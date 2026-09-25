@@ -224,10 +224,17 @@ void CommandBufferMetal::CmdSetViewports(const Viewport* v, uint32_t n) {
         m_RenderEncoder->setViewports(m_Viewports, n);
 }
 
+static inline MTL::ScissorRect GetScissorRectMetal(const nri::Rect& rect) {
+    const int32_t x = std::max<int32_t>(0, rect.x);
+    const int32_t y = std::max<int32_t>(0, rect.y);
+
+    return {(NS::UInteger)x, (NS::UInteger)y, (NS::UInteger)std::max<int32_t>(0, int32_t(rect.x) + rect.width - x), (NS::UInteger)std::max<int32_t>(0, int32_t(rect.y) + rect.height - y)};
+}
+
 void CommandBufferMetal::CmdSetScissors(const Rect* r, uint32_t n) {
     m_ScissorNum = n;
     for (uint32_t i = 0; i < n; i++)
-        m_Scissors[i] = {(NS::UInteger)std::max<int>(0, r[i].x), (NS::UInteger)std::max<int>(0, r[i].y), r[i].width, r[i].height};
+        m_Scissors[i] = GetScissorRectMetal(r[i]);
 
     if (m_RenderEncoder)
         m_RenderEncoder->setScissorRects(m_Scissors, n);
@@ -589,7 +596,7 @@ void CommandBufferMetal::CmdClearAttachments(const ClearAttachmentDesc* clears, 
         m_RenderEncoder->setViewport(viewport);
         if (rectNum) {
             for (uint32_t j = 0; j < rectNum; j++) {
-                MTL::ScissorRect scissor = {(NS::UInteger)std::max<int32_t>(rects[j].x, 0), (NS::UInteger)std::max<int32_t>(rects[j].y, 0), rects[j].width, rects[j].height};
+                MTL::ScissorRect scissor = GetScissorRectMetal(rects[j]);
                 m_RenderEncoder->setScissorRect(scissor);
                 m_RenderEncoder->drawPrimitives(MTL::PrimitiveTypeTriangle, 0, 3);
             }

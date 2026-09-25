@@ -15,6 +15,8 @@ struct NriDescriptorEntry {
 // aligns to 8 bytes and packs 64-bit root-descriptor addresses, then pointers to
 // each nonempty resource/sampler descriptor-set table. The block is aligned to
 // 16 bytes. Declare a matching constant structure, including padding.
+// Within each table, fixed ranges retain declaration order and the variable-sized
+// range follows them. Range offsets do not depend on the allocated variable count.
 // Direct heaps are not fields of this root buffer. Buffers 4 and 5 are reserved
 // for converted-shader draw metadata; vertex streams use buffer(6 + bindingSlot).
 //

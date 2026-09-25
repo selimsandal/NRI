@@ -18,6 +18,7 @@ struct DescriptorSetMappingMetal {
     Vector<DescriptorRangeMappingMetal> ranges;
     uint32_t resourceNum = 0;
     uint32_t samplerNum = 0;
+    uint32_t variableRange = UINT32_MAX;
 };
 
 struct DescriptorSetMetal final : public DebugNameBase {

@@ -23,6 +23,9 @@ DeviceMetal::~DeviceMetal() {
 }
 
 Result DeviceMetal::Create(const DeviceCreationDesc& desc) {
+    if (desc.enableGraphicsAPIValidation)
+        NRI_REPORT_WARNING(this, "Metal API validation must be enabled before launch using MTL_DEBUG_LAYER=1 or Xcode's API Validation setting; enableGraphicsAPIValidation does not enable it");
+
     MTL::Device* device = MTL::CreateSystemDefaultDevice();
     if (!device)
         return Result::UNSUPPORTED;

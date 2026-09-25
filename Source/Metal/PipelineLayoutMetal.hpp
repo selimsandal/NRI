@@ -80,6 +80,20 @@ Result PipelineLayoutMetal::Create(const PipelineLayoutDesc& desc) {
                 mapping.resourceNum += range.descriptorNum;
 
             mapping.ranges.push_back(m);
+
+            if (range.flags & DescriptorRangeBits::VARIABLE_SIZED_ARRAY)
+                mapping.variableRange = j;
+        }
+
+        if (mapping.variableRange != UINT32_MAX) {
+            auto& variable = mapping.ranges[mapping.variableRange];
+
+            for (uint32_t j = mapping.variableRange + 1; j < set.rangeNum; j++) {
+                if (mapping.ranges[j].sampler == variable.sampler)
+                    mapping.ranges[j].offset -= variable.descriptorNum;
+            }
+
+            variable.offset = (variable.sampler ? mapping.samplerNum : mapping.resourceNum) - variable.descriptorNum;
         }
 
         // D3D root tables cannot mix resource and sampler descriptors. Each

@@ -40,12 +40,12 @@ Result DescriptorPoolMetal::AllocateSets(const PipelineLayoutMetal& layout, uint
     const DescriptorSetMappingMetal& mapping = layout.GetDescriptorSetMapping(setIndex);
     uint32_t resources = mapping.resourceNum;
     uint32_t samplers = mapping.samplerNum;
-    if (variableNum && !mapping.ranges.empty()) {
-        const DescriptorRangeMappingMetal& last = mapping.ranges.back();
-        if (last.sampler)
-            samplers -= last.descriptorNum - variableNum;
+    if (variableNum && mapping.variableRange != UINT32_MAX) {
+        const DescriptorRangeMappingMetal& variable = mapping.ranges[mapping.variableRange];
+        if (variable.sampler)
+            samplers -= variable.descriptorNum - variableNum;
         else
-            resources -= last.descriptorNum - variableNum;
+            resources -= variable.descriptorNum - variableNum;
     }
     if (m_Sets.size() + instanceNum > m_SetCapacity || m_ResourceUsed + resources * instanceNum > m_ResourceCapacity || m_SamplerUsed + samplers * instanceNum > m_SamplerCapacity)
         return Result::OUT_OF_MEMORY;
