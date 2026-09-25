@@ -166,6 +166,7 @@ bool DeviceVal::Create() {
     m_IsExtSupported.swapChain = deviceBaseImpl.FillFunctionTable(m_iSwapChainImpl) == Result::SUCCESS;
     m_IsExtSupported.wrapperD3D11 = deviceBaseImpl.FillFunctionTable(m_iWrapperD3D11Impl) == Result::SUCCESS;
     m_IsExtSupported.wrapperD3D12 = deviceBaseImpl.FillFunctionTable(m_iWrapperD3D12Impl) == Result::SUCCESS;
+    m_IsExtSupported.wrapperMetal = deviceBaseImpl.FillFunctionTable(m_iWrapperMetalImpl) == Result::SUCCESS;
     m_IsExtSupported.wrapperVK = deviceBaseImpl.FillFunctionTable(m_iWrapperVKImpl) == Result::SUCCESS;
 
     m_Desc = GetDesc();
@@ -1542,6 +1543,70 @@ NRI_INLINE Result DeviceVal::CreateAccelerationStructure(const AccelerationStruc
     accelerationStructure = nullptr;
     if (result == Result::SUCCESS)
         accelerationStructure = (AccelerationStructure*)Allocate<AccelerationStructureVal>(GetAllocationCallbacks(), *this, accelerationStructureImpl, true);
+
+    return result;
+}
+
+#endif
+
+#if NRI_ENABLE_METAL_SUPPORT
+
+NRI_INLINE Result DeviceVal::CreateBuffer(const BufferMetalDesc& desc, Buffer*& buffer) {
+    NRI_RETURN_ON_FAILURE(this, desc.mtlBuffer != nullptr, Result::INVALID_ARGUMENT, "'mtlBuffer' is NULL");
+    NRI_RETURN_ON_FAILURE(this, desc.desc.size != 0, Result::INVALID_ARGUMENT, "'desc.size' is 0");
+
+    Buffer* impl = nullptr;
+    Result result = m_iWrapperMetalImpl.CreateBufferMetal(m_Impl, desc, impl);
+    buffer = nullptr;
+    if (result == Result::SUCCESS) {
+        buffer = (Buffer*)Allocate<BufferVal>(GetAllocationCallbacks(), *this, impl, true);
+
+        if (!buffer) {
+            m_iCoreImpl.DestroyBuffer(impl);
+            result = Result::OUT_OF_MEMORY;
+        }
+    }
+
+    return result;
+}
+
+NRI_INLINE Result DeviceVal::CreateTexture(const TextureMetalDesc& desc, Texture*& texture) {
+    NRI_RETURN_ON_FAILURE(this, desc.mtlTexture != nullptr, Result::INVALID_ARGUMENT, "'mtlTexture' is NULL");
+    NRI_RETURN_ON_FAILURE(this, desc.desc.type < TextureType::MAX_NUM, Result::INVALID_ARGUMENT, "'desc.type' is invalid");
+    NRI_RETURN_ON_FAILURE(this, desc.desc.format > Format::UNKNOWN && desc.desc.format < Format::MAX_NUM, Result::INVALID_ARGUMENT, "'desc.format' is invalid");
+    NRI_RETURN_ON_FAILURE(this, desc.desc.sharingMode < SharingMode::MAX_NUM, Result::INVALID_ARGUMENT, "'desc.sharingMode' is invalid");
+    NRI_RETURN_ON_FAILURE(this, desc.desc.width != 0, Result::INVALID_ARGUMENT, "'desc.width' is 0");
+    NRI_RETURN_ON_FAILURE(this, desc.desc.mipNum <= GetMaxMipNum(desc.desc.width, desc.desc.height, desc.desc.depth), Result::INVALID_ARGUMENT, "'desc.mipNum' is invalid");
+
+    Texture* impl = nullptr;
+    Result result = m_iWrapperMetalImpl.CreateTextureMetal(m_Impl, desc, impl);
+    texture = nullptr;
+    if (result == Result::SUCCESS) {
+        texture = (Texture*)Allocate<TextureVal>(GetAllocationCallbacks(), *this, impl, true);
+
+        if (!texture) {
+            m_iCoreImpl.DestroyTexture(impl);
+            result = Result::OUT_OF_MEMORY;
+        }
+    }
+
+    return result;
+}
+
+NRI_INLINE Result DeviceVal::CreateFence(const FenceMetalDesc& desc, Fence*& fence) {
+    NRI_RETURN_ON_FAILURE(this, desc.mtlSharedEvent != nullptr, Result::INVALID_ARGUMENT, "'mtlSharedEvent' is NULL");
+
+    Fence* impl = nullptr;
+    Result result = m_iWrapperMetalImpl.CreateFenceMetal(m_Impl, desc, impl);
+    fence = nullptr;
+    if (result == Result::SUCCESS) {
+        fence = (Fence*)Allocate<FenceVal>(GetAllocationCallbacks(), *this, impl);
+
+        if (!fence) {
+            m_iCoreImpl.DestroyFence(impl);
+            result = Result::OUT_OF_MEMORY;
+        }
+    }
 
     return result;
 }

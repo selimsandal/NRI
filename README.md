@@ -23,7 +23,7 @@ Supported GAPIs:
 - *D3D12*
 - *D3D11*
 - *WebGPU* (through [wgpu-native](https://github.com/gfx-rs/wgpu-native))
-- *Metal* (through [MoltenVK](https://github.com/KhronosGroup/MoltenVK))
+- *Metal 4* (native backend through [metal-cpp](https://developer.apple.com/metal/cpp/))
 - None / dummy (everything is supported but does nothing)
 
 ## WHY NRI?
@@ -72,6 +72,10 @@ Repository organization:
 Notes:
 - *Xlib* and *Wayland* can be both enabled
 - Minimal supported client is Windows 8.1+
+- The native Metal 4 backend requires macOS 26, Xcode 26+, and [metal-cpp](https://developer.apple.com/metal/cpp/) headers. Native `.metallib` shaders need no converter; HLSL/DXIL requires Metal Shader Converter 4.0.1 and `NRI_ENABLE_METAL_SHADER_CONVERTER=ON`.
+- Install the Metal compiler with `xcodebuild -downloadComponent MetalToolchain`. Place metal-cpp next to NRI or set `NRI_METAL_CPP_PATH`. Compile native shaders with `xcrun -sdk macosx metal -c shader.metal -o shader.air` and `xcrun -sdk macosx metallib shader.air -o shader.metallib`; [NRI.metal](Include/NRI.metal) describes the native binding ABI.
+- Metal Shader Converter installs headers and `libmetalirconverter.dylib` under `/usr/local` by default. Override their paths with the CMake options below. SDK packaging does not redistribute Converter; applications using DXIL must install it separately under Apple's license.
+- Query `DeviceDesc` and `GetFormatSupport` for optional Metal features. Metal 4 acceleration structures require Apple9 (M3/A17 Pro) or newer; depth bounds require Apple10. Ray-tracing execution and depth bounds have not been verified on supported hardware. Metal Shader Converter does not support `SV_ViewID`, so flexible multiview is unavailable.
 
 ## CMAKE OPTIONS
 
@@ -80,12 +84,17 @@ Notes:
 - `NRI_AGILITY_SDK_VERSION_MINOR` - *Agility SDK* minor version
 - `NRI_SHADERS_PATH` - Shader output path override
 - `NRI_NVAPI_CUSTOM_PATH` - Path to a custom NVAPI library directory
+- `NRI_METAL_CPP_PATH` - Path to Metal 4-capable metal-cpp headers
+- `NRI_METAL_SHADER_CONVERTER_INCLUDE_PATH` - Optional Metal Shader Converter include root
+- `NRI_METAL_SHADER_CONVERTER_LIBRARY` - Optional Metal Shader Converter library
 - `NRI_STATIC_LIBRARY` - Build static library
 - `NRI_ENABLE_NVTX_SUPPORT` - Annotations for NVIDIA Nsight Systems
 - `NRI_ENABLE_DEBUG_NAMES_AND_ANNOTATIONS` - Enable debug names, host and device annotations
 - `NRI_ENABLE_NONE_SUPPORT` - Enable NONE backend
 - `NRI_ENABLE_VK_SUPPORT` - Enable *Vulkan* backend
 - `NRI_ENABLE_WGPU_SUPPORT` - Enable *WebGPU* backend through *wgpu-native*
+- `NRI_ENABLE_METAL_SUPPORT` - Enable the native Metal 4 backend on Apple platforms
+- `NRI_ENABLE_METAL_SHADER_CONVERTER` - Enable DXIL conversion in the Metal backend; native `.metallib` shaders do not need it
 - `NRI_ENABLE_VALIDATION_SUPPORT` - Enable Validation backend (otherwise `enableNRIValidation` is ignored)
 - `NRI_ENABLE_NIS_SDK` - Enable NVIDIA Image Sharpening SDK
 - `NRI_ENABLE_IMGUI_EXTENSION` - Enable `NRIImgui` extension

@@ -56,6 +56,9 @@ set(NRI_AGILITY_SDK_VERSION_MINOR "5" CACHE STRING "Agility SDK minor version") 
 set(NRI_WGPU_VERSION "v29.0.1.1")
 set(NRI_SHADERS_PATH "${CMAKE_CURRENT_SOURCE_DIR}/_Shaders" CACHE STRING "Shader output path override")
 set(NRI_NVAPI_CUSTOM_PATH "" CACHE STRING "Path to a custom NVAPI library directory")
+set(NRI_METAL_CPP_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../metal-cpp" CACHE PATH "Path to metal-cpp headers")
+set(NRI_METAL_SHADER_CONVERTER_INCLUDE_PATH "" CACHE PATH "Path to Metal Shader Converter headers")
+set(NRI_METAL_SHADER_CONVERTER_LIBRARY "" CACHE FILEPATH "Path to the Metal Shader Converter library")
 
 option(NRI_STATIC_LIBRARY "Build static library" OFF)
 option(NRI_ENABLE_NVTX_SUPPORT "Annotations for NVIDIA Nsight Systems" ON)
@@ -70,6 +73,8 @@ option(NRI_STREAMER_THREAD_SAFE "'NRIStreamer' thread safety (OFF is faster)" ON
 cmake_dependent_option(NRI_ENABLE_D3D11_SUPPORT "Enable D3D11 backend" ON "WIN32" OFF)
 cmake_dependent_option(NRI_ENABLE_D3D12_SUPPORT "Enable D3D12 backend" ON "WIN32" OFF)
 cmake_dependent_option(NRI_ENABLE_WGPU_SUPPORT "Enable WebGPU backend" ${GITHUB_CI} "WGPU_BIN_ARCHITECTURE" OFF)
+cmake_dependent_option(NRI_ENABLE_METAL_SUPPORT "Enable Metal 4 backend" ON "APPLE" OFF)
+cmake_dependent_option(NRI_ENABLE_METAL_SHADER_CONVERTER "Enable DXIL conversion in the Metal backend" OFF "NRI_ENABLE_METAL_SUPPORT" OFF)
 cmake_dependent_option(NRI_ENABLE_AMDAGS "Enable AMD AGS library for D3D" ON "(NRI_ENABLE_D3D11_SUPPORT OR NRI_ENABLE_D3D12_SUPPORT); NOT IS_ARM64" OFF)
 cmake_dependent_option(NRI_ENABLE_NVAPI "Enable NVAPI library for D3D" ON "(NRI_ENABLE_D3D11_SUPPORT OR NRI_ENABLE_D3D12_SUPPORT); NOT IS_ARM64" OFF)
 cmake_dependent_option(NRI_ENABLE_AGILITY_SDK_SUPPORT "Enable Agility SDK support to unlock access to latest D3D12 features" ON "NRI_ENABLE_D3D12_SUPPORT" OFF)
@@ -110,6 +115,8 @@ foreach(opt IN ITEMS
     NRI_ENABLE_NONE_SUPPORT
     NRI_ENABLE_VK_SUPPORT
     NRI_ENABLE_WGPU_SUPPORT
+    NRI_ENABLE_METAL_SUPPORT
+    NRI_ENABLE_METAL_SHADER_CONVERTER
     NRI_ENABLE_VALIDATION_SUPPORT
     NRI_ENABLE_NIS_SDK
     NRI_ENABLE_IMGUI_EXTENSION
@@ -863,6 +870,102 @@ if(NRI_ENABLE_WGPU_SUPPORT)
     )
 endif()
 
+# Metal
+if(NRI_ENABLE_METAL_SUPPORT)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 17)
+        message(FATAL_ERROR "NRI: Metal 4 requires Xcode 26 or newer (AppleClang 17 or newer)")
+    endif()
+
+    if(NOT EXISTS "${NRI_METAL_CPP_PATH}/Metal/Metal.hpp" OR NOT EXISTS "${NRI_METAL_CPP_PATH}/Metal/MTL4ArgumentTable.hpp")
+        message(FATAL_ERROR "NRI: Metal 4 metal-cpp headers were not found at '${NRI_METAL_CPP_PATH}'. Set NRI_METAL_CPP_PATH to a current metal-cpp checkout containing Metal/Metal.hpp and Metal/MTL4ArgumentTable.hpp")
+    endif()
+
+    if(NRI_ENABLE_METAL_SHADER_CONVERTER)
+        if(NOT NRI_METAL_SHADER_CONVERTER_INCLUDE_PATH)
+            unset(NRI_METAL_SHADER_CONVERTER_INCLUDE_PATH CACHE)
+        endif()
+        if(NOT NRI_METAL_SHADER_CONVERTER_LIBRARY)
+            unset(NRI_METAL_SHADER_CONVERTER_LIBRARY CACHE)
+        endif()
+        find_path(NRI_METAL_SHADER_CONVERTER_INCLUDE_PATH metal_irconverter/metal_irconverter.h REQUIRED)
+        find_library(NRI_METAL_SHADER_CONVERTER_LIBRARY NAMES metalirconverter REQUIRED)
+        message(STATUS "NRI: Metal Shader Converter headers: ${NRI_METAL_SHADER_CONVERTER_INCLUDE_PATH}")
+        message(STATUS "NRI: Metal Shader Converter library: ${NRI_METAL_SHADER_CONVERTER_LIBRARY}")
+    endif()
+
+    if(NRI_ENABLE_IMGUI_EXTENSION)
+        find_program(NRI_XCRUN xcrun REQUIRED)
+        find_program(NRI_XXD xxd REQUIRED)
+        set(NRI_IMGUI_METAL_AIR "${CMAKE_CURRENT_BINARY_DIR}/Imgui.air")
+        set(NRI_IMGUI_METALLIB "${CMAKE_CURRENT_BINARY_DIR}/Imgui.metallib")
+        set(NRI_IMGUI_METALLIB_HEADER "${CMAKE_CURRENT_BINARY_DIR}/Imgui.metallib.h")
+        add_custom_command(
+            OUTPUT "${NRI_IMGUI_METALLIB_HEADER}"
+            COMMAND "${NRI_XCRUN}" -sdk macosx metal -std=metal3.2 -c "${CMAKE_CURRENT_SOURCE_DIR}/Shaders/Imgui.metal" -o "${NRI_IMGUI_METAL_AIR}"
+            COMMAND "${NRI_XCRUN}" -sdk macosx metallib "${NRI_IMGUI_METAL_AIR}" -o "${NRI_IMGUI_METALLIB}"
+            COMMAND "${NRI_XXD}" -i -n g_Imgui_metallib "${NRI_IMGUI_METALLIB}" "${NRI_IMGUI_METALLIB_HEADER}"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/Shaders/Imgui.metal"
+            VERBATIM
+        )
+        add_custom_target(NRI_Metal_ImguiShader DEPENDS "${NRI_IMGUI_METALLIB_HEADER}")
+        add_dependencies(NRI_Shared NRI_Metal_ImguiShader)
+        target_include_directories(NRI_Shared PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+    endif()
+
+    set(METAL_SOURCE
+        "Source/Metal/AccelerationStructureMetal.h"
+        "Source/Metal/AccelerationStructureMetal.hpp"
+        "Source/Metal/BufferMetal.h"
+        "Source/Metal/BufferMetal.hpp"
+        "Source/Metal/CommandAllocatorMetal.h"
+        "Source/Metal/CommandAllocatorMetal.hpp"
+        "Source/Metal/CommandBufferMetal.h"
+        "Source/Metal/CommandBufferMetal.hpp"
+        "Source/Metal/ConversionMetal.h"
+        "Source/Metal/ConversionMetal.hpp"
+        "Source/Metal/DescriptorMetal.h"
+        "Source/Metal/DescriptorMetal.hpp"
+        "Source/Metal/DescriptorPoolMetal.h"
+        "Source/Metal/DescriptorPoolMetal.hpp"
+        "Source/Metal/DescriptorSetMetal.h"
+        "Source/Metal/DescriptorSetMetal.hpp"
+        "Source/Metal/DeviceMetal.h"
+        "Source/Metal/DeviceMetal.hpp"
+        "Source/Metal/FenceMetal.h"
+        "Source/Metal/FenceMetal.hpp"
+        "Source/Metal/ImplMetal.cpp"
+        "Source/Metal/MemoryMetal.h"
+        "Source/Metal/MemoryMetal.hpp"
+        "Source/Metal/PipelineCacheMetal.h"
+        "Source/Metal/PipelineCacheMetal.hpp"
+        "Source/Metal/PipelineLayoutMetal.h"
+        "Source/Metal/PipelineLayoutMetal.hpp"
+        "Source/Metal/PipelineMetal.h"
+        "Source/Metal/PipelineMetal.hpp"
+        "Source/Metal/PipelineRayTracingMetal.hpp"
+        "Source/Metal/QueryPoolMetal.h"
+        "Source/Metal/QueryPoolMetal.hpp"
+        "Source/Metal/QueueMetal.h"
+        "Source/Metal/QueueMetal.hpp"
+        "Source/Metal/SharedMetal.h"
+        "Source/Metal/SwapChainMetal.h"
+        "Source/Metal/SwapChainMetal.hpp"
+        "Source/Metal/TextureMetal.h"
+        "Source/Metal/TextureMetal.hpp"
+    )
+
+    add_library(NRI_Metal STATIC)
+    target_sources(NRI_Metal PRIVATE ${METAL_SOURCE})
+    target_include_directories(NRI_Metal PRIVATE "${NRI_METAL_CPP_PATH}")
+    target_compile_options(NRI_Metal PRIVATE -fblocks)
+    target_link_libraries(NRI_Metal PRIVATE NRI_Shared "-framework Foundation" "-framework Metal" "-framework QuartzCore")
+    if(NRI_ENABLE_METAL_SHADER_CONVERTER)
+        target_include_directories(NRI_Metal PRIVATE "${NRI_METAL_SHADER_CONVERTER_INCLUDE_PATH}")
+        target_link_libraries(NRI_Metal PRIVATE "${NRI_METAL_SHADER_CONVERTER_LIBRARY}")
+    endif()
+    set_target_properties(NRI_Metal PROPERTIES FOLDER "NRI")
+endif()
+
 # Validation
 if(NRI_ENABLE_VALIDATION_SUPPORT)
     set(NRI_VALIDATION_SOURCE
@@ -961,6 +1064,7 @@ set(NRI_EXTENSIONS
     "Include/Extensions/NRIVideo.h"
     "Include/Extensions/NRIWrapperD3D11.h"
     "Include/Extensions/NRIWrapperD3D12.h"
+    "Include/Extensions/NRIWrapperMetal.h"
     "Include/Extensions/NRIWrapperVK.h"
 )
 source_group("Include/Extensions"
@@ -1018,6 +1122,9 @@ target_include_directories(NRI
         $<$<BOOL:${NRI_ENABLE_WGPU_SUPPORT}>:
             "${wgpu_native_SOURCE_DIR}/include"
         >
+        $<$<BOOL:${NRI_ENABLE_METAL_SUPPORT}>:
+            "${NRI_METAL_CPP_PATH}"
+        >
     PUBLIC
         "Include"
 )
@@ -1056,6 +1163,9 @@ target_link_libraries(NRI
         >
         $<$<BOOL:${NRI_ENABLE_WGPU_SUPPORT}>:
             NRI_WGPU
+        >
+        $<$<BOOL:${NRI_ENABLE_METAL_SUPPORT}>:
+            NRI_Metal
         >
         $<$<BOOL:${NRI_ENABLE_VALIDATION_SUPPORT}>:
             NRI_Validation

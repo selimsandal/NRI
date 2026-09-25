@@ -41,6 +41,10 @@ Result CreateDeviceD3D11(const DeviceCreationDesc& deviceCreationDesc, const Dev
 Result CreateDeviceD3D12(const DeviceCreationDesc& deviceCreationDesc, const DeviceCreationD3D12Desc& deviceCreationDescD3D12, DeviceBase*& device);
 Result CreateDeviceVK(const DeviceCreationDesc& deviceCreationDesc, const DeviceCreationVKDesc& deviceCreationDescVK, DeviceBase*& device);
 Result CreateDeviceWGPU(const DeviceCreationDesc& deviceCreationDesc, DeviceBase*& device);
+Result CreateDeviceMetal(const DeviceCreationDesc& deviceCreationDesc, DeviceBase*& device);
+Result CreateDeviceMetal(const DeviceCreationDesc& deviceCreationDesc, const DeviceCreationMetalDesc& deviceCreationMetalDesc, DeviceBase*& device);
+bool GetAdapterDescMetal(AdapterDesc& adapterDesc);
+bool GetAdapterDescMetal(AdapterDesc& adapterDesc, void* device);
 DeviceBase* CreateDeviceValidation(const DeviceCreationDesc& deviceCreationDesc, DeviceBase& device);
 
 static constexpr uint64_t Hash(const char* name) {
@@ -739,6 +743,10 @@ NRI_API Result NRI_CALL nriGetInterface(const Device& device, const char* interf
         realInterfaceSize = sizeof(WrapperD3D12Interface);
         if (realInterfaceSize == interfaceSize)
             result = deviceBase.FillFunctionTable(*(WrapperD3D12Interface*)interfacePtr);
+    } else if (hash == Hash(NRI_STRINGIFY(WrapperMetalInterface))) {
+        realInterfaceSize = sizeof(WrapperMetalInterface);
+        if (realInterfaceSize == interfaceSize)
+            result = deviceBase.FillFunctionTable(*(WrapperMetalInterface*)interfacePtr);
     } else if (hash == Hash(NRI_STRINGIFY(WrapperVKInterface))) {
         realInterfaceSize = sizeof(WrapperVKInterface);
         if (realInterfaceSize == interfaceSize)
@@ -938,10 +946,63 @@ NRI_API Result NRI_CALL nriCreateDevice(const DeviceCreationDesc& deviceCreation
         result = CreateDeviceWGPU(modifiedDeviceCreationDesc, deviceImpl);
 #endif
 
+#if NRI_ENABLE_METAL_SUPPORT
+    if (modifiedDeviceCreationDesc.graphicsAPI == GraphicsAPI::METAL)
+        result = CreateDeviceMetal(modifiedDeviceCreationDesc, deviceImpl);
+#endif
+
     if (result != Result::SUCCESS)
         return result;
 
     return FinalizeDeviceCreation(modifiedDeviceCreationDesc, *deviceImpl, device);
+}
+
+NRI_API Result NRI_CALL nriCreateDeviceFromMetalDevice(const DeviceCreationMetalDesc& deviceCreationMetalDesc, Device*& device) {
+#if NRI_ENABLE_METAL_SUPPORT
+    if (!deviceCreationMetalDesc.mtlDevice)
+        return Result::INVALID_ARGUMENT;
+
+    DeviceCreationDesc deviceCreationDesc = {};
+    deviceCreationDesc.graphicsAPI = GraphicsAPI::METAL;
+    deviceCreationDesc.callbackInterface = deviceCreationMetalDesc.callbackInterface;
+    deviceCreationDesc.allocationCallbacks = deviceCreationMetalDesc.allocationCallbacks;
+    deviceCreationDesc.enableNRIValidation = deviceCreationMetalDesc.enableNRIValidation;
+
+    AdapterDesc adapterDesc = {};
+    if (!GetAdapterDescMetal(adapterDesc, deviceCreationMetalDesc.mtlDevice))
+        return Result::UNSUPPORTED;
+    deviceCreationDesc.adapterDesc = &adapterDesc;
+
+    QueueFamilyDesc queueFamilies[3] = {};
+    for (uint32_t i = 0; i < 3; i++) {
+        if (deviceCreationMetalDesc.mtl4Queues[i]) {
+            QueueFamilyDesc& family = queueFamilies[deviceCreationDesc.queueFamilyNum++];
+            family.queueType = (QueueType)i;
+            family.queueNum = 1;
+        }
+    }
+
+    if (!deviceCreationDesc.queueFamilyNum) {
+        queueFamilies[0].queueType = QueueType::GRAPHICS;
+        queueFamilies[0].queueNum = 1;
+        deviceCreationDesc.queueFamilyNum = 1;
+    }
+    deviceCreationDesc.queueFamilies = queueFamilies;
+
+    CheckAndSetDefaultCallbacks(deviceCreationDesc);
+
+    DeviceBase* deviceImpl = nullptr;
+    Result result = CreateDeviceMetal(deviceCreationDesc, deviceCreationMetalDesc, deviceImpl);
+
+    if (result != Result::SUCCESS)
+        return result;
+
+    return FinalizeDeviceCreation(deviceCreationDesc, *deviceImpl, device);
+#else
+    MaybeUnused(deviceCreationMetalDesc, device);
+
+    return Result::UNSUPPORTED;
+#endif
 }
 
 NRI_API Result NRI_CALL nriCreateDeviceFromD3D11Device(const DeviceCreationD3D11Desc& deviceCreationD3D11Desc, Device*& device) {
@@ -1171,6 +1232,8 @@ NRI_API const char* NRI_CALL nriGetGraphicsAPIString(GraphicsAPI graphicsAPI) {
             return "VK";
         case GraphicsAPI::WGPU:
             return "WGPU";
+        case GraphicsAPI::METAL:
+            return "METAL";
         default:
             return "UNKNOWN";
     }
@@ -1190,6 +1253,22 @@ NRI_API Result NRI_CALL nriEnumerateAdapters(AdapterDesc* outAdapterDescs, uint3
 
 #if NRI_ENABLE_WGPU_SUPPORT
     UpdateAdaptersWGPU(adapterDescs.data(), adapterDescNum);
+#endif
+
+#if NRI_ENABLE_METAL_SUPPORT
+    AdapterDesc metalAdapterDesc = {};
+    if (GetAdapterDescMetal(metalAdapterDesc)) {
+        bool merged = false;
+        for (uint32_t i = 0; i < adapterDescNum; i++) {
+            if (adapterDescs[i].deviceId == metalAdapterDesc.deviceId || strcmp(adapterDescs[i].name, metalAdapterDesc.name) == 0) {
+                adapterDescs[i].supportedGraphicsAPIs |= GraphicsAPI::METAL;
+                merged = true;
+                break;
+            }
+        }
+        if (!merged && adapterDescNum < ADAPTER_MAX_NUM)
+            adapterDescs[adapterDescNum++] = metalAdapterDesc;
+    }
 #endif
 
 #if NRI_ENABLE_NONE_SUPPORT
