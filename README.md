@@ -73,7 +73,7 @@ Notes:
 - *Xlib* and *Wayland* can be both enabled
 - Minimal supported client is Windows 8.1+
 - The native Metal 4 backend requires macOS 26, Xcode 26+, and [metal-cpp](https://developer.apple.com/metal/cpp/) headers. Native `.metallib` shaders need no converter; HLSL/DXIL requires Metal Shader Converter 4.0.1 and `NRI_ENABLE_METAL_SHADER_CONVERTER=ON`.
-- Install the Metal compiler with `xcodebuild -downloadComponent MetalToolchain`. Place metal-cpp next to NRI or set `NRI_METAL_CPP_PATH`. Compile native shaders with `xcrun -sdk macosx metal -c shader.metal -o shader.air` and `xcrun -sdk macosx metallib shader.air -o shader.metallib`; [NRI.metal](Include/NRI.metal) describes the native binding ABI.
+- Install the Metal compiler with `xcodebuild -downloadComponent MetalToolchain`. CMake downloads pinned metal-cpp headers from Apple when the Metal backend is enabled. Compile native shaders with `xcrun -sdk macosx metal -c shader.metal -o shader.air` and `xcrun -sdk macosx metallib shader.air -o shader.metallib`; [NRI.metal](Include/NRI.metal) describes the native binding ABI.
 - Metal Shader Converter installs headers and `libmetalirconverter.dylib` under `/usr/local` by default. Override their paths with the CMake options below. SDK packaging does not redistribute Converter; applications using DXIL must install it separately under Apple's license.
 - Query `DeviceDesc` and `GetFormatSupport` for optional Metal features. Metal 4 acceleration structures require Apple9 (M3/A17 Pro) or newer; depth bounds require Apple10. Ray-tracing execution and depth bounds have not been verified on supported hardware. Metal Shader Converter does not support `SV_ViewID`, so flexible multiview is unavailable.
 
@@ -84,7 +84,6 @@ Notes:
 - `NRI_AGILITY_SDK_VERSION_MINOR` - *Agility SDK* minor version
 - `NRI_SHADERS_PATH` - Shader output path override
 - `NRI_NVAPI_CUSTOM_PATH` - Path to a custom NVAPI library directory
-- `NRI_METAL_CPP_PATH` - Path to Metal 4-capable metal-cpp headers
 - `NRI_METAL_SHADER_CONVERTER_INCLUDE_PATH` - Optional Metal Shader Converter include root
 - `NRI_METAL_SHADER_CONVERTER_LIBRARY` - Optional Metal Shader Converter library
 - `NRI_STATIC_LIBRARY` - Build static library

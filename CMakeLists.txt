@@ -56,7 +56,6 @@ set(NRI_AGILITY_SDK_VERSION_MINOR "5" CACHE STRING "Agility SDK minor version") 
 set(NRI_WGPU_VERSION "v29.0.1.1")
 set(NRI_SHADERS_PATH "${CMAKE_CURRENT_SOURCE_DIR}/_Shaders" CACHE STRING "Shader output path override")
 set(NRI_NVAPI_CUSTOM_PATH "" CACHE STRING "Path to a custom NVAPI library directory")
-set(NRI_METAL_CPP_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../metal-cpp" CACHE PATH "Path to metal-cpp headers")
 set(NRI_METAL_SHADER_CONVERTER_INCLUDE_PATH "" CACHE PATH "Path to Metal Shader Converter headers")
 set(NRI_METAL_SHADER_CONVERTER_LIBRARY "" CACHE FILEPATH "Path to the Metal Shader Converter library")
 
@@ -168,6 +167,18 @@ if(NRI_ENABLE_NVTX_SUPPORT)
         URL "https://github.com/NVIDIA/NVTX/archive/refs/tags/v3.6.0.zip"
     )
     list(APPEND DEPS nvtx)
+endif()
+
+if(NRI_ENABLE_METAL_SUPPORT)
+    # metal-cpp (macOS 27 / iOS 27)
+    fetchcontent_declare(
+        metal_cpp
+        DOWNLOAD_EXTRACT_TIMESTAMP 1
+        DOWNLOAD_NO_PROGRESS 1
+        SOURCE_SUBDIR "ignore CMakeLists.txt"
+        URL "https://github.com/apple/metal-cpp/archive/27c4382b7151d55a51692cdcb27aaa98752240de.zip"
+    )
+    list(APPEND DEPS metal_cpp)
 endif()
 
 if(NRI_ENABLE_VK_SUPPORT)
@@ -876,8 +887,8 @@ if(NRI_ENABLE_METAL_SUPPORT)
         message(FATAL_ERROR "NRI: Metal 4 requires Xcode 26 or newer (AppleClang 17 or newer)")
     endif()
 
-    if(NOT EXISTS "${NRI_METAL_CPP_PATH}/Metal/Metal.hpp" OR NOT EXISTS "${NRI_METAL_CPP_PATH}/Metal/MTL4ArgumentTable.hpp")
-        message(FATAL_ERROR "NRI: Metal 4 metal-cpp headers were not found at '${NRI_METAL_CPP_PATH}'. Set NRI_METAL_CPP_PATH to a current metal-cpp checkout containing Metal/Metal.hpp and Metal/MTL4ArgumentTable.hpp")
+    if(NOT EXISTS "${metal_cpp_SOURCE_DIR}/Metal/Metal.hpp" OR NOT EXISTS "${metal_cpp_SOURCE_DIR}/Metal/MTL4ArgumentTable.hpp")
+        message(FATAL_ERROR "NRI: Metal 4 metal-cpp headers were not found at '${metal_cpp_SOURCE_DIR}'")
     endif()
 
     if(NRI_ENABLE_METAL_SHADER_CONVERTER)
@@ -956,7 +967,7 @@ if(NRI_ENABLE_METAL_SUPPORT)
 
     add_library(NRI_Metal STATIC)
     target_sources(NRI_Metal PRIVATE ${METAL_SOURCE})
-    target_include_directories(NRI_Metal PRIVATE "${NRI_METAL_CPP_PATH}")
+    target_include_directories(NRI_Metal PRIVATE "${metal_cpp_SOURCE_DIR}")
     target_compile_options(NRI_Metal PRIVATE -fblocks)
     target_link_libraries(NRI_Metal PRIVATE NRI_Shared "-framework Foundation" "-framework Metal" "-framework QuartzCore")
     if(NRI_ENABLE_METAL_SHADER_CONVERTER)
@@ -1123,7 +1134,7 @@ target_include_directories(NRI
             "${wgpu_native_SOURCE_DIR}/include"
         >
         $<$<BOOL:${NRI_ENABLE_METAL_SUPPORT}>:
-            "${NRI_METAL_CPP_PATH}"
+            "${metal_cpp_SOURCE_DIR}"
         >
     PUBLIC
         "Include"
