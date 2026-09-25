@@ -39,8 +39,15 @@ struct NriMultiview {
 // Function-table indices come from WriteShaderGroupIdentifiers, not resource IDs.
 // Indices start at 1; hit-group intersection entries follow the shader library.
 // Native libraries define their visible-function signatures and must use matching
-// signatures in every caller. Arbitrary native and converted ray functions cannot
-// be mixed without implementing Converter's payload and recursion ABI.
+// signatures in every caller. A ray pipeline must contain either native or DXIL
+// shaders, not both. NRI binds tables and dispatch data; native libraries implement
+// traversal, payload/attribute storage, recursion and miss/hit/callable invocation.
+// There is no implicit translation of native function signatures to the DXR ABI.
+// Payload and attribute size declarations do not allocate native shader storage.
+// Native shaders must respect the pipeline's recursion limit and skip flags.
+// Metal's indirect-call stack remains at its default depth (1). Ray recursion is
+// not the same as indirect-call nesting: native companions needing deeper ray
+// recursion must manage it explicitly, without nested recursive indirect calls.
 // The dispatch kernel must support both 8x8x1 and 1x1x1 threadgroups.
 struct NriShaderIdentifier {
     ulong intersectionShaderHandle;
@@ -59,6 +66,16 @@ struct NriShaderIdentifier {
 // An acceleration-structure descriptor addresses a 64-byte header: the first two
 // ulong fields hold the instance-AS resource ID and per-instance hit-group contribution
 // pointer; the remaining fields are reserved. Instance IDs and masks are preserved.
+// A typed argument-buffer declaration for that header is:
+//   struct Scene {
+//       metal::raytracing::instance_acceleration_structure accelerationStructure;
+//       constant uint* instanceContributions;
+//       ulong reserved[6];
+//   };
+// Include <metal_raytracing> before using this declaration. Index contributions
+// with the intersection's instance index, not its application-defined user ID.
+// Companions are resolved in shader-library order; when several libraries export
+// a companion, they must provide the same implementation and signatures.
 
 struct NriShaderRecordRange {
     constant NriShaderIdentifier* address;
@@ -98,5 +115,20 @@ struct NriRayDispatchArguments {
     ulong intersectionFunctions;
     ulong intersectionTables;
 };
+
+static_assert(sizeof(NriDescriptorEntry) == 24, "Descriptor ABI mismatch");
+static_assert(sizeof(NriShaderIdentifier) == 32, "Shader identifier ABI mismatch");
+static_assert(__builtin_offsetof(NriShaderIdentifier, shaderHandle) == 8, "Shader handle ABI mismatch");
+static_assert(sizeof(NriShaderRecordRange) == 16, "Shader record ABI mismatch");
+static_assert(sizeof(NriShaderTableRange) == 24, "Shader table ABI mismatch");
+static_assert(sizeof(NriRayDispatchDesc) == 104, "Ray dispatch ABI mismatch");
+static_assert(__builtin_offsetof(NriRayDispatchDesc, width) == 88, "Ray dimensions ABI mismatch");
+static_assert(sizeof(NriRayDispatchArguments) == 152, "Ray arguments ABI mismatch");
+static_assert(__builtin_offsetof(NriRayDispatchArguments, root) == 104, "Ray root ABI mismatch");
+static_assert(__builtin_offsetof(NriRayDispatchArguments, resources) == 112, "Resource heap ABI mismatch");
+static_assert(__builtin_offsetof(NriRayDispatchArguments, samplers) == 120, "Sampler heap ABI mismatch");
+static_assert(__builtin_offsetof(NriRayDispatchArguments, visibleFunctions) == 128, "Visible table ABI mismatch");
+static_assert(__builtin_offsetof(NriRayDispatchArguments, intersectionFunctions) == 136, "Intersection table ABI mismatch");
+static_assert(__builtin_offsetof(NriRayDispatchArguments, intersectionTables) == 144, "Multiple-table ABI mismatch");
 
 #endif

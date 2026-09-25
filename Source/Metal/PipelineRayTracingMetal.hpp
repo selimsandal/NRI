@@ -7,6 +7,12 @@ struct MetalShaderIdentifier {
     uint64_t padding;
 };
 
+static_assert(sizeof(MetalShaderIdentifier) == 32, "Native shader identifier ABI mismatch");
+static_assert(offsetof(MetalShaderIdentifier, intersectionShaderHandle) == 0, "Native intersection identifier ABI mismatch");
+static_assert(offsetof(MetalShaderIdentifier, shaderHandle) == 8, "Native visible identifier ABI mismatch");
+static_assert(offsetof(MetalShaderIdentifier, localRootSignatureSamplersBuffer) == 16, "Native local root ABI mismatch");
+static_assert(offsetof(MetalShaderIdentifier, padding) == 24, "Native identifier padding ABI mismatch");
+
 #if NRI_ENABLE_METAL_SHADER_CONVERTER
 static inline IRShaderStage GetIRRayTracingShaderStage(StageBits stage) {
     if (stage == StageBits::RAYGEN_SHADER)
@@ -31,9 +37,20 @@ Result PipelineMetal::Create(const RayTracingPipelineDesc& desc) {
     m_Layout = (const PipelineLayoutMetal*)desc.pipelineLayout;
     const ShaderLibraryDesc& shaderLibrary = *desc.shaderLibrary;
     bool hasConvertedShaders = false;
+    bool hasNativeShaders = false;
     for (uint32_t i = 0; i < shaderLibrary.shaderNum; i++) {
         const ShaderDesc& shader = shaderLibrary.shaders[i];
-        hasConvertedShaders |= shader.size >= 4 && memcmp(shader.bytecode, "DXBC", 4) == 0;
+        const bool isDxil = shader.size >= 4 && memcmp(shader.bytecode, "DXBC", 4) == 0;
+        hasConvertedShaders |= isDxil;
+        hasNativeShaders |= !isDxil;
+    }
+
+    // Native libraries own their payload and callable signatures. Converter's
+    // generated dispatch/traversal functions cannot infer or adapt those signatures.
+    if ((hasConvertedShaders && hasNativeShaders) || (desc.flags & RayTracingPipelineBits::ALLOW_MICROMAPS)) {
+        pool->release();
+
+        return Result::UNSUPPORTED;
     }
     Vector<MTL::Library*> libraries(m_Device.GetStdAllocator());
     Vector<MTL::Function*> functions(m_Device.GetStdAllocator());
@@ -232,10 +249,11 @@ Result PipelineMetal::Create(const RayTracingPipelineDesc& desc) {
         return false;
 #endif
     };
+    const Result missingIntersection = hasConvertedShaders ? Result::FAILURE : Result::UNSUPPORTED;
     if (result == Result::SUCCESS && !(desc.flags & RayTracingPipelineBits::SKIP_TRIANGLES))
-        result = synthesizeIntersection(false, "irconverter.wrapper.intersection.function.triangle", triangleLibrary, triangleFunction) ? Result::SUCCESS : Result::FAILURE;
+        result = synthesizeIntersection(false, "irconverter.wrapper.intersection.function.triangle", triangleLibrary, triangleFunction) ? Result::SUCCESS : missingIntersection;
     if (result == Result::SUCCESS && !(desc.flags & RayTracingPipelineBits::SKIP_AABBS))
-        result = synthesizeIntersection(true, "irconverter.wrapper.intersection.function.procedural", proceduralLibrary, proceduralFunction) ? Result::SUCCESS : Result::FAILURE;
+        result = synthesizeIntersection(true, "irconverter.wrapper.intersection.function.procedural", proceduralLibrary, proceduralFunction) ? Result::SUCCESS : missingIntersection;
     if (triangleFunction)
         linkedFunctions.push_back(triangleFunction);
     if (proceduralFunction)

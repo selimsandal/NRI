@@ -1439,6 +1439,16 @@ MTL::GPUAddress CommandBufferMetal::SetRayDispatchArguments(const DispatchRaysIn
         DispatchRaysIndirectDesc desc;
         uint64_t root, resources, samplers, visibleFunctions, intersectionFunctions, intersectionTables;
     } args = {};
+
+    static_assert(sizeof(DispatchRaysIndirectDesc) == 104, "Native ray dispatch ABI mismatch");
+    static_assert(offsetof(DispatchRaysIndirectDesc, width) == 88, "Native ray dimensions ABI mismatch");
+    static_assert(sizeof(Arguments) == 152, "Native ray arguments ABI mismatch");
+    static_assert(offsetof(Arguments, root) == 104, "Native ray root ABI mismatch");
+    static_assert(offsetof(Arguments, resources) == 112, "Native resource heap ABI mismatch");
+    static_assert(offsetof(Arguments, samplers) == 120, "Native sampler heap ABI mismatch");
+    static_assert(offsetof(Arguments, visibleFunctions) == 128, "Native visible table ABI mismatch");
+    static_assert(offsetof(Arguments, intersectionFunctions) == 136, "Native intersection table ABI mismatch");
+    static_assert(offsetof(Arguments, intersectionTables) == 144, "Native multiple-table ABI mismatch");
 #if NRI_ENABLE_METAL_SHADER_CONVERTER
     static_assert(sizeof(DispatchRaysIndirectDesc) == sizeof(IRDispatchRaysDescriptor), "Ray dispatch descriptor ABI mismatch");
     static_assert(offsetof(DispatchRaysIndirectDesc, width) == offsetof(IRDispatchRaysDescriptor, Width), "Ray dispatch dimensions ABI mismatch");

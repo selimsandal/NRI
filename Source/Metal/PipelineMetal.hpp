@@ -337,12 +337,26 @@ Result PipelineMetal::Create(const GraphicsPipelineDesc& desc) {
     bool hasGeometry = false;
     bool hasTessellation = false;
     bool hasFragment = false;
+    bool hasNativeShaders = false;
+    bool hasConvertedShaders = false;
 
     for (uint32_t i = 0; i < desc.shaderNum; i++) {
+        const ShaderDesc& shader = desc.shaders[i];
+        const bool isDxil = shader.size >= 4 && memcmp(shader.bytecode, "DXBC", 4) == 0;
+        hasNativeShaders |= !isDxil;
+        hasConvertedShaders |= isDxil;
         isMesh |= desc.shaders[i].stage == StageBits::MESH_SHADER;
         hasGeometry |= desc.shaders[i].stage == StageBits::GEOMETRY_SHADER;
         hasTessellation |= desc.shaders[i].stage == StageBits::TESS_CONTROL_SHADER || desc.shaders[i].stage == StageBits::TESS_EVALUATION_SHADER;
         hasFragment |= desc.shaders[i].stage == StageBits::FRAGMENT_SHADER;
+    }
+
+    // Converter does not implement SV_ViewID, and its stage-emulation ABI is not
+    // the native MSL mesh/object ABI. Do not silently route native stages through it.
+    if ((hasConvertedShaders && m_ViewMask && m_Multiview == Multiview::FLEXIBLE) || (hasNativeShaders && (hasGeometry || hasTessellation))) {
+        pool->release();
+
+        return Result::UNSUPPORTED;
     }
 
     if (!hasFragment && desc.multisample && desc.multisample->sampleMask != ALL) {

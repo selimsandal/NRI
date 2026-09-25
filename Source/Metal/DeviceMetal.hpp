@@ -305,14 +305,13 @@ void DeviceMetal::FillDesc(const AdapterDesc& adapterDesc) {
     m_Desc.shaderFeatures.waveQuad = true;
     m_Desc.shaderFeatures.integerDotProduct = true;
     m_Desc.shaderFeatures.unnormalizedCoordinates = true;
+    m_Desc.features.flexibleMultiview = m_Desc.other.viewMaxNum > 1;
 #if NRI_ENABLE_METAL_SHADER_CONVERTER
     // Converter stage-in attributes start at slot 11 in Metal's 31-entry descriptor.
     m_Desc.shaderStage.vertex.attributeMaxNum = 20;
     m_Desc.features.shaderBytecodeDXIL = true;
     m_Desc.features.geometryShader = true;
     m_Desc.features.tessellationShader = true;
-#else
-    m_Desc.features.flexibleMultiview = m_Desc.other.viewMaxNum > 1;
 #endif
     // Metal 4 address-driven AS builds require Apple9, unlike legacy supportsRaytracing.
     if (m_Device->supportsFamily(MTL::GPUFamilyApple9)) {

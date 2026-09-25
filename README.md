@@ -76,10 +76,30 @@ Notes:
 - Install the Metal compiler with `xcodebuild -downloadComponent MetalToolchain`. CMake downloads pinned metal-cpp headers from Apple when the Metal backend is enabled. Compile native shaders with `xcrun -sdk macosx metal -c shader.metal -o shader.air` and `xcrun -sdk macosx metallib shader.air -o shader.metallib`; [NRI.metal](Include/NRI.metal) describes the native binding ABI.
 - Metal Shader Converter installs headers and `libmetalirconverter.dylib` under `/usr/local` by default. Override their paths with the CMake options below. SDK packaging does not redistribute Converter; applications using DXIL must install it separately under Apple's license.
 - Query `DeviceDesc` and `GetFormatSupport` for optional Metal features. Metal 4 acceleration structures require Apple9 (M3/A17 Pro) or newer; depth bounds require Apple10. Ray-tracing execution and depth bounds have not been verified on supported hardware.
-- Metal supports two-view layer-based and viewport-based multiview. Converter-free builds also expose flexible multiview through the native view-index binding in [NRI.metal](Include/NRI.metal). Metal Shader Converter does not support `SV_ViewID`. Geometry and tessellation stages require Converter's mesh-shader emulation; Metal 4 has no native patch-draw commands. Native shaders can use mesh/object stages directly.
-- Metal swapchains support G22, linear-float and PQ color spaces, and waitable presentation through drawable presentation callbacks. `GetDisplayDesc`, LowLatency and Video interfaces are unsupported: the public Apple APIs do not expose the complete NRI contracts. Variable-rate rasterization maps do not implement NRI shading-rate semantics. Pipeline-statistics queries, micromaps and region resolves are not exposed.
-- NIS requires `NRI_ENABLE_NIS_SDK=ON` and Metal Shader Converter. Other upscalers are unsupported on Metal; MetalFX is not an NRI upscaler type. Native fragment shaders implement sample masks with `[[sample_mask]]`; pipeline sample masks require Converter.
 - Set `MTL_DEBUG_LAYER=1` before launching to enable Apple API validation. `MTL_SHADER_VALIDATION=1` additionally instruments shaders, but is incompatible with binary archives and can exceed hardware resource limits for large kernels. Run pipeline-cache tests separately without shader instrumentation.
+
+## METAL FEATURE SUPPORT
+
+Optional capabilities describe the NRI contract, not the presence of a similarly named Metal API. In particular, partial native support does not enable a capability whose remaining cases would silently produce different results.
+
+| Feature | Support and restrictions |
+| --- | --- |
+| Multiview | Two-view layer-based and viewport-based rendering. Flexible multiview is available to native shaders in both Converter-enabled and Converter-free builds through [NRI.metal](Include/NRI.metal). Converted flexible-multiview pipelines return `UNSUPPORTED`; Converter does not implement `SV_ViewID`. |
+| Geometry and tessellation | HLSL stages use Converter's mesh/object emulation. Metal 4 has no native patch-draw commands or traditional geometry stage. Native shaders use mesh/object stages directly. |
+| Ray tracing | Apple9 or newer. Native pipelines supply a custom dispatch/traversal ABI described in [NRI.metal](Include/NRI.metal); DXIL pipelines use Converter's ABI. Mixing native and DXIL ray stages is unsupported. Native procedural intersection functions include any-hit logic rather than combining separate intersection and any-hit entries. |
+| Presentation | G22, linear-float and PQ swapchain color spaces; waitable presentation through drawable callbacks. No low-latency boost or driver telemetry is implied by waitable presentation. |
+| Display metadata | `GetDisplayDesc` returns `UNSUPPORTED`. The supplied `CAMetalLayer` does not identify an `NSScreen`, and public EDR headroom ratios do not provide all four luminance values required by `DisplayDesc`. |
+| Resolves | Full color average resolves. Region resolves and general min/max resolves remain disabled. Native depth resolve filters provide sample-zero/min/max, not NRI's depth average; stencil filters do not implement NRI's independent reduction operations. A shader region-resolve fallback would require additional texture usages and format support that NRI does not require of resolve resources. |
+| Sampler min/max | `filterOpMinMax` remains false. Metal's [reduction mode](https://developer.apple.com/documentation/metal/mtlsamplerdescriptor/reductionmode) is ignored unless minification, magnification and mip filtering are all linear. NRI also allows other filter combinations, so setting this flag would overstate support. |
+| Pipeline statistics | Unsupported. Metal 4 counter heaps provide timestamps, not NRI's complete statistics record. Legacy Metal's optional statistics counters are not an equivalent replacement. Occlusion and timestamp queries are supported. |
+| Shading rate | Unsupported through NRI's shading-rate interface. Metal rasterization-rate maps change rasterization density and require coordinate mapping; they do not implement NRI's per-draw/per-primitive/attachment rates and combiners. |
+| Conservative rasterization, logic operations, micromaps | No matching native Metal 4 mapping is exposed. Geometry expansion, shader blending or any-hit approximations are not advertised as equivalent features. |
+| LowLatency | Unsupported. Public presentation timing does not supply the complete NRI sleep/boost and driver/OS latency-report contract. |
+| Video | Unsupported through `VideoInterface`. VideoToolbox exists, but its sessions, pixel buffers and asynchronous codec operations do not directly implement NRI's command-buffer/resource/feedback contract. |
+| Upscalers | NIS requires `NRI_ENABLE_NIS_SDK=ON` and Converter. Other NRI upscalers are unsupported on Metal. MetalFX requires a separate algorithm/API integration; it is not an implementation of NIS or FSR. |
+| Sample masks | Native fragment shaders use `[[sample_mask]]`; pipeline sample masks require Converter. |
+
+Tile shaders, rasterization-rate maps and Metal tensor/machine-learning facilities have no corresponding NRI command interface. Exposing them requires separate API design, not enabling existing capability flags. Shader emulation of optional features must preserve NRI's resource requirements and results; this backend does not broaden these contracts with implicit staging or CPU waits.
 
 ## CMAKE OPTIONS
 
