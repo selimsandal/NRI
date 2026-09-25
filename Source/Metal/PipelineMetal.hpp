@@ -309,6 +309,9 @@ Result PipelineMetal::Create(const ComputePipelineDesc& desc) {
         if (m_Compute && archive && !archive->addComputePipelineFunctions(pd, &error))
             result = Result::FAILURE;
 
+        if (result != Result::SUCCESS && !(desc.flags & ComputePipelineBits::FAIL_ON_CACHE_MISS))
+            m_Device.ReportMessage(Message::ERROR, result, __FILE__, __LINE__, "Metal compute pipeline creation or archive update failed: %s", error ? error->localizedDescription()->utf8String() : "unknown error");
+
         pd->release();
 
         if (!m_Converted)
@@ -329,6 +332,8 @@ Result PipelineMetal::Create(const GraphicsPipelineDesc& desc) {
     NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
     m_Layout = (const PipelineLayoutMetal*)desc.pipelineLayout;
     bool isMesh = false;
+    m_Multiview = desc.outputMerger.multiview;
+    m_ViewMask = desc.outputMerger.viewMask;
     bool hasGeometry = false;
     bool hasTessellation = false;
     bool hasFragment = false;
@@ -404,6 +409,14 @@ Result PipelineMetal::Create(const GraphicsPipelineDesc& desc) {
         }
     }
     const uint32_t sampleNum = desc.multisample ? desc.multisample->sampleNum : 1;
+    uint32_t amplificationCount = 0;
+    for (uint32_t mask = m_ViewMask; mask; mask >>= 1)
+        amplificationCount++;
+
+    if (m_Multiview == Multiview::VIEWPORT_BASED)
+        amplificationCount = m_Device.GetDesc().other.viewMaxNum;
+
+    amplificationCount = std::max(1u, amplificationCount);
     if (isMesh) {
         // Metal mesh pipelines require a fragment function even for depth-only draws.
         if (result == Result::SUCCESS && !mpd->fragmentFunction()) {
@@ -420,6 +433,7 @@ Result PipelineMetal::Create(const GraphicsPipelineDesc& desc) {
             } else
                 result = Result::FAILURE;
         }
+        mpd->setMaxVertexAmplificationCount(amplificationCount);
         mpd->setRasterSampleCount(sampleNum);
         mpd->setAlphaToCoverageEnabled(desc.multisample && desc.multisample->alphaToCoverage);
         if (hasGeometry || hasTessellation) {
@@ -435,6 +449,8 @@ Result PipelineMetal::Create(const GraphicsPipelineDesc& desc) {
         }
         mpd->setPayloadMemoryLength(hasGeometry || hasTessellation ? 16384 : m_MeshPayloadSize);
     } else {
+        pd->setInputPrimitiveTopology(desc.inputAssembly.topology == Topology::POINT_LIST ? MTL::PrimitiveTopologyClassPoint : (desc.inputAssembly.topology <= Topology::LINE_STRIP ? MTL::PrimitiveTopologyClassLine : MTL::PrimitiveTopologyClassTriangle));
+        pd->setMaxVertexAmplificationCount(amplificationCount);
         pd->setSampleCount(sampleNum);
         pd->setAlphaToCoverageEnabled(desc.multisample && desc.multisample->alphaToCoverage);
     }

@@ -27,6 +27,7 @@
 #include "HelperInterface.h"
 #include "ImguiInterface.h"
 #include "StreamerInterface.h"
+#include "UpscalerInterface.h"
 
 using namespace nri;
 
@@ -1164,6 +1165,54 @@ Result DeviceMetal::FillFunctionTable(ImguiInterface& table) const {
 }
 
 #endif
+
+#pragma endregion
+
+//============================================================================================================================================================================================
+#pragma region[  Upscaler  ]
+
+static Result NRI_CALL CreateUpscaler(Device& device, const UpscalerDesc& upscalerDesc, Upscaler*& upscaler) {
+    DeviceMetal& deviceMetal = (DeviceMetal&)device;
+    UpscalerImpl* impl = Allocate<UpscalerImpl>(deviceMetal.GetAllocationCallbacks(), device, deviceMetal.GetCoreInterface());
+    upscaler = nullptr;
+
+    if (!impl)
+        return Result::OUT_OF_MEMORY;
+
+    Result result = impl->Create(upscalerDesc);
+    if (result != Result::SUCCESS)
+        Destroy(deviceMetal.GetAllocationCallbacks(), impl);
+    else
+        upscaler = (Upscaler*)impl;
+
+    return result;
+}
+
+static void NRI_CALL DestroyUpscaler(Upscaler* upscaler) {
+    Destroy((UpscalerImpl*)upscaler);
+}
+
+static bool NRI_CALL IsUpscalerSupported(const Device& device, UpscalerType upscalerType) {
+    return IsUpscalerSupported(((DeviceMetal&)device).GetDesc(), upscalerType);
+}
+
+static void NRI_CALL GetUpscalerProps(const Upscaler& upscaler, UpscalerProps& upscalerProps) {
+    ((UpscalerImpl&)upscaler).GetUpscalerProps(upscalerProps);
+}
+
+static void NRI_CALL CmdDispatchUpscale(CommandBuffer& commandBuffer, Upscaler& upscaler, const DispatchUpscaleDesc& dispatchUpscalerDesc) {
+    ((UpscalerImpl&)upscaler).CmdDispatchUpscale(commandBuffer, dispatchUpscalerDesc);
+}
+
+Result DeviceMetal::FillFunctionTable(UpscalerInterface& table) const {
+    table.CreateUpscaler = ::CreateUpscaler;
+    table.DestroyUpscaler = ::DestroyUpscaler;
+    table.IsUpscalerSupported = ::IsUpscalerSupported;
+    table.GetUpscalerProps = ::GetUpscalerProps;
+    table.CmdDispatchUpscale = ::CmdDispatchUpscale;
+
+    return Result::SUCCESS;
+}
 
 #pragma endregion
 

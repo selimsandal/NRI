@@ -1,6 +1,12 @@
 // © 2026 NVIDIA Corporation
 
 SwapChainMetal::~SwapChainMetal() {
+    {
+        std::lock_guard<std::mutex> lock(m_PresentationState->lock);
+        m_PresentationState->isShuttingDown = true;
+    }
+    m_PresentationState->conditionVariable.notify_all();
+
     if (m_DrawableResidency) {
         m_Queue->GetNativeObject()->removeResidencySet(m_DrawableResidency);
         m_DrawableResidency->release();
@@ -29,9 +35,19 @@ Result SwapChainMetal::Create(const SwapChainDesc& desc) {
     // An sRGB attachment would encode it again and wash out colors.
     MTL::PixelFormat format = desc.format == SwapChainFormat::BT709_G10_16BIT ? MTL::PixelFormatRGBA16Float : (desc.format == SwapChainFormat::BT709_G22_10BIT || desc.format == SwapChainFormat::BT2020_G2084_10BIT ? MTL::PixelFormatRGB10A2Unorm : MTL::PixelFormatBGRA8Unorm);
     m_Layer->setPixelFormat(format);
+
+    CFStringRef colorSpaceName = desc.format == SwapChainFormat::BT709_G10_16BIT ? kCGColorSpaceExtendedLinearSRGB : (desc.format == SwapChainFormat::BT2020_G2084_10BIT ? kCGColorSpaceITUR_2100_PQ : kCGColorSpaceSRGB);
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateWithName(colorSpaceName);
+    if (!colorSpace)
+        return Result::FAILURE;
+
+    m_Layer->setColorspace(colorSpace);
+    CGColorSpaceRelease(colorSpace);
+    m_Layer->setWantsExtendedDynamicRangeContent(desc.format == SwapChainFormat::BT709_G10_16BIT || desc.format == SwapChainFormat::BT2020_G2084_10BIT);
     m_Layer->setFramebufferOnly(false);
     m_Layer->setDrawableSize(CGSizeMake(desc.width, desc.height));
     m_Layer->setDisplaySyncEnabled(bool(desc.flags & SwapChainBits::VSYNC));
+    m_IsWaitable = bool(desc.flags & SwapChainBits::WAITABLE);
     uint32_t textureNum = std::max<uint32_t>(2, desc.textureNum);
     textureNum = std::min<uint32_t>(3, textureNum);
     m_Layer->setMaximumDrawableCount(textureNum);
@@ -83,20 +99,40 @@ Result SwapChainMetal::AcquireNextTexture(FenceMetal& fence, uint32_t& textureIn
 Result SwapChainMetal::Present(FenceMetal& fence, uint64_t presentId) {
     if (!m_Drawable || !fence.IsSwapChainSemaphore())
         return Result::INVALID_ARGUMENT;
+
+    if (m_IsWaitable && presentId) {
+        std::shared_ptr<PresentationState> state = m_PresentationState;
+        m_Drawable->addPresentedHandler([state, presentId](MTL::Drawable*) {
+            {
+                std::lock_guard<std::mutex> lock(state->lock);
+                state->completedPresentId = std::max(state->completedPresentId, presentId);
+            }
+            state->conditionVariable.notify_all();
+        });
+    }
+
     m_Queue->GetNativeObject()->wait(fence.GetNativeObject(), fence.GetScheduledValue());
     m_Queue->GetNativeObject()->signalDrawable(m_Drawable);
     m_Drawable->present();
     m_Drawable->release();
     m_Drawable = nullptr;
-    m_LastPresentId = presentId;
 
     return Result::SUCCESS;
 }
 
 Result SwapChainMetal::WaitForPresent(uint64_t presentId) {
-    MaybeUnused(presentId);
+    if (!m_IsWaitable || !presentId)
+        return Result::UNSUPPORTED;
 
-    return Result::UNSUPPORTED;
+    std::shared_ptr<PresentationState> state = m_PresentationState;
+    std::unique_lock<std::mutex> lock(state->lock);
+    bool wasPresented = state->conditionVariable.wait_for(lock, std::chrono::milliseconds(NRI_TIMEOUT_PRESENT), [&] {
+        return state->completedPresentId >= presentId || state->isShuttingDown;
+    });
+    if (!wasPresented || state->isShuttingDown)
+        return Result::FAILURE;
+
+    return Result::SUCCESS;
 }
 
 Result SwapChainMetal::GetDisplayDesc(DisplayDesc& desc) {

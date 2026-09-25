@@ -31,6 +31,15 @@ struct PipelineMetal final : public DebugNameBase {
     MTL::DepthClipMode GetDepthClipMode() const;
     bool IsDepthBoundsEnabled() const;
     bool HasSampleLocations() const;
+
+    Multiview GetMultiview() const {
+        return m_Multiview;
+    }
+
+    uint32_t GetViewMask() const {
+        return m_ViewMask;
+    }
+
     const DepthBiasDesc& GetDepthBias() const;
     MTL::Size GetThreadGroupSize() const;
     MTL::Size GetMeshThreadGroupSize() const;
@@ -64,6 +73,8 @@ private:
     MTL::DepthClipMode m_DepthClip = MTL::DepthClipModeClip;
     bool m_DepthBounds = false;
     bool m_SampleLocations = false;
+    Multiview m_Multiview = Multiview::FLEXIBLE;
+    uint32_t m_ViewMask = 0;
     DepthBiasDesc m_DepthBias = {};
     MTL::Size m_ThreadGroup = MTL::Size(1, 1, 1), m_MeshGroup = MTL::Size(1, 1, 1), m_TaskGroup = MTL::Size(1, 1, 1);
     uint32_t m_MeshPayloadSize = 0;

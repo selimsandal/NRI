@@ -297,6 +297,8 @@ void CommandBufferMetal::CmdBeginRendering(const RenderingDesc& desc) {
 
     MTL4::RenderPassDescriptor* pass = MTL4::RenderPassDescriptor::alloc()->init();
     m_RenderColorNum = (uint8_t)desc.colorNum;
+    m_ViewMask = desc.viewMask;
+    uint32_t layerNum = UINT32_MAX;
     m_RenderDepth = m_RenderStencil = MTL::PixelFormatInvalid;
     m_RenderWidth = m_RenderHeight = UINT32_MAX;
     m_RenderSampleNum = 1;
@@ -312,6 +314,7 @@ void CommandBufferMetal::CmdBeginRendering(const RenderingDesc& desc) {
         n->setLevel(d.GetTextureViewDesc().mipOffset);
         n->setSlice(d.GetTextureViewDesc().layerOffset);
         n->setDepthPlane(d.GetTextureViewDesc().sliceOffset);
+        layerNum = std::min(layerNum, d.GetTextureViewDesc().layerNum == REMAINING ? uint32_t(d.GetTexture()->arrayLength()) - d.GetTextureViewDesc().layerOffset : uint32_t(d.GetTextureViewDesc().layerNum));
         n->setLoadAction(a.loadOp == LoadOp::CLEAR ? MTL::LoadActionClear : MTL::LoadActionLoad);
         n->setStoreAction(a.storeOp == StoreOp::STORE ? MTL::StoreActionStore : MTL::StoreActionDontCare);
         const FormatProps& props = GetFormatProps(d.GetTextureViewDesc().format);
@@ -342,6 +345,7 @@ void CommandBufferMetal::CmdBeginRendering(const RenderingDesc& desc) {
         n->setLevel(d.GetTextureViewDesc().mipOffset);
         n->setSlice(d.GetTextureViewDesc().layerOffset);
         n->setLoadAction(a.loadOp == LoadOp::CLEAR ? MTL::LoadActionClear : MTL::LoadActionLoad);
+        layerNum = std::min(layerNum, d.GetTextureViewDesc().layerNum == REMAINING ? uint32_t(d.GetTexture()->arrayLength()) - d.GetTextureViewDesc().layerOffset : uint32_t(d.GetTextureViewDesc().layerNum));
         n->setStoreAction(a.storeOp == StoreOp::STORE ? MTL::StoreActionStore : MTL::StoreActionDontCare);
         if (depth)
             depthAttachment->setClearDepth(a.clearValue.depthStencil.depth);
@@ -382,6 +386,7 @@ void CommandBufferMetal::CmdBeginRendering(const RenderingDesc& desc) {
     }
     if (desc.stencil.descriptor)
         setDepthStencil(desc.stencil, false);
+    pass->setRenderTargetArrayLength(layerNum == UINT32_MAX ? 1 : layerNum);
     for (uint32_t i = 0; i < m_RenderColorNum; i++) {
         auto* attachment = pass->colorAttachments()->object(i);
         m_RenderStore[i] = attachment->storeAction();
@@ -416,6 +421,24 @@ void CommandBufferMetal::ApplyRasterState() {
 }
 
 void CommandBufferMetal::BindArguments(BindPoint point) {
+    if (point == BindPoint::GRAPHICS && m_RenderPipelineDirty && m_Pipeline) {
+        MTL::VertexAmplificationViewMapping mappings[32] = {};
+        uint32_t viewIndices[32] = {};
+        uint32_t count = 0;
+        const Multiview multiview = m_Pipeline->GetMultiview();
+        uint32_t mask = multiview == Multiview::LAYER_BASED ? m_Pipeline->GetViewMask() : m_ViewMask;
+        for (uint32_t view = 0; mask; view++, mask >>= 1) {
+            if (mask & 1) {
+                viewIndices[count] = view;
+                mappings[count].renderTargetArrayIndexOffset = multiview == Multiview::LAYER_BASED ? view : 0;
+                mappings[count].viewportArrayIndexOffset = multiview == Multiview::VIEWPORT_BASED ? view : 0;
+                count++;
+            }
+        }
+        m_RenderEncoder->setVertexAmplificationCount(std::max(1u, count), mappings);
+        if (count && !m_Pipeline->IsConverted())
+            m_Arguments->setAddress(m_Allocator->Upload(viewIndices, sizeof(viewIndices)), 3);
+    }
     // A previous pass's pipeline may not match the new attachments. Bind only
     // when drawing, after the caller has selected the pipeline for this pass.
     if (point == BindPoint::GRAPHICS && m_RenderPipelineDirty && m_Pipeline) {
@@ -475,7 +498,7 @@ ClearPipelineMetal* CommandBufferMetal::GetClearPipeline(uint32_t colorIndex, Pl
             return &clear;
     }
     if (!m_ClearLibrary) {
-        std::string source = "#include <metal_stdlib>\nusing namespace metal;\nstruct C { float4 f; float depth; };\nvertex float4 clear_vs(uint i [[vertex_id]], constant C& c [[buffer(3)]]) { float2 p[3] = {float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[i], c.depth, 1); }\n";
+        std::string source = "#include <metal_stdlib>\nusing namespace metal;\nstruct C { float4 f; float depth; };\nstruct V { float4 position [[position]]; uint layer [[render_target_array_index]]; };\nvertex V clear_vs(uint i [[vertex_id]], uint layer [[instance_id]], constant C& c [[buffer(3)]]) { float2 p[3] = {float2(-1,-1),float2(3,-1),float2(-1,3)}; return {float4(p[i], c.depth, 1), layer}; }\n";
         const char* types[] = {"float4", "uint4", "int4"};
         const char* fields[] = {"c.f", "as_type<uint4>(c.f)", "as_type<int4>(c.f)"};
         for (uint32_t type = 0; type < 3; type++) {
@@ -500,6 +523,7 @@ ClearPipelineMetal* CommandBufferMetal::GetClearPipeline(uint32_t colorIndex, Pl
     snprintf(name, sizeof(name), "clear_%u_%u", isInteger ? (isSigned ? 2 : 1) : 0, colorIndex);
     MTL::Function* fragment = m_ClearLibrary->newFunction(NS::String::string(name, NS::UTF8StringEncoding));
     pd->setVertexFunction(vertex);
+    pd->setInputPrimitiveTopology(MTL::PrimitiveTopologyClassTriangle);
     if (planes & PlaneBits::COLOR)
         pd->setFragmentFunction(fragment);
     pd->setSampleCount(m_RenderSampleNum);
@@ -582,6 +606,7 @@ void CommandBufferMetal::CmdClearAttachments(const ClearAttachmentDesc* clears, 
         m_Arguments->setAddress(m_Allocator->Upload(&constants, sizeof(constants)), 3);
         m_RenderEncoder->setArgumentTable(m_Arguments, MTL::RenderStageVertex | MTL::RenderStageFragment);
         m_RenderEncoder->setRenderPipelineState(clear->pipeline);
+        m_RenderEncoder->setVertexAmplificationCount(1, nullptr);
         m_RenderEncoder->setDepthStencilState(clear->depthStencil);
         m_RenderEncoder->setCullMode(MTL::CullModeNone);
         m_RenderEncoder->setTriangleFillMode(MTL::TriangleFillModeFill);
@@ -598,12 +623,12 @@ void CommandBufferMetal::CmdClearAttachments(const ClearAttachmentDesc* clears, 
             for (uint32_t j = 0; j < rectNum; j++) {
                 MTL::ScissorRect scissor = GetScissorRectMetal(rects[j]);
                 m_RenderEncoder->setScissorRect(scissor);
-                m_RenderEncoder->drawPrimitives(MTL::PrimitiveTypeTriangle, 0, 3);
+                m_RenderEncoder->drawPrimitives(MTL::PrimitiveTypeTriangle, 0, 3, m_RenderPass->renderTargetArrayLength());
             }
         } else {
             MTL::ScissorRect scissor = {0, 0, m_RenderWidth, m_RenderHeight};
             m_RenderEncoder->setScissorRect(scissor);
-            m_RenderEncoder->drawPrimitives(MTL::PrimitiveTypeTriangle, 0, 3);
+            m_RenderEncoder->drawPrimitives(MTL::PrimitiveTypeTriangle, 0, 3, m_RenderPass->renderTargetArrayLength());
         }
     }
     m_RenderPipelineDirty = true;
@@ -1414,6 +1439,13 @@ MTL::GPUAddress CommandBufferMetal::SetRayDispatchArguments(const DispatchRaysIn
         DispatchRaysIndirectDesc desc;
         uint64_t root, resources, samplers, visibleFunctions, intersectionFunctions, intersectionTables;
     } args = {};
+#if NRI_ENABLE_METAL_SHADER_CONVERTER
+    static_assert(sizeof(DispatchRaysIndirectDesc) == sizeof(IRDispatchRaysDescriptor), "Ray dispatch descriptor ABI mismatch");
+    static_assert(offsetof(DispatchRaysIndirectDesc, width) == offsetof(IRDispatchRaysDescriptor, Width), "Ray dispatch dimensions ABI mismatch");
+    static_assert(sizeof(Arguments) == sizeof(IRDispatchRaysArgument), "Ray dispatch arguments ABI mismatch");
+    static_assert(offsetof(Arguments, root) == offsetof(IRDispatchRaysArgument, GRS), "Ray dispatch root ABI mismatch");
+    static_assert(offsetof(Arguments, visibleFunctions) == offsetof(IRDispatchRaysArgument, VisibleFunctionTable), "Ray dispatch function table ABI mismatch");
+#endif
 
     args.desc = desc;
     args.root = m_Allocator->Upload(m_Compute.root.data(), m_Compute.root.size());

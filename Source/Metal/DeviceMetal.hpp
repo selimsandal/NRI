@@ -243,6 +243,12 @@ void DeviceMetal::FillDesc(const AdapterDesc& adapterDesc) {
     m_Desc.shaderStage.mesh.dispatchWorkGroupMaxNum = m_Device->supportsFamily(MTL::GPUFamilyApple10) ? 4194303 : (m_Device->supportsFamily(MTL::GPUFamilyApple9) ? 1048575 : 1024);
     m_Desc.wave.laneMinNum = 32;
     m_Desc.wave.laneMaxNum = 32;
+    m_Desc.wave.waveOpsStages = StageBits::ALL_SHADERS;
+    m_Desc.wave.quadOpsStages = StageBits::FRAGMENT_SHADER | StageBits::COMPUTE_SHADER;
+    m_Desc.wave.derivativeOpsStages = StageBits::FRAGMENT_SHADER | StageBits::COMPUTE_SHADER | StageBits::TASK_SHADER | StageBits::MESH_SHADER;
+    // MTL4RenderCommandEncoder permits at most two amplified outputs.
+    for (uint8_t count = 1; count <= 2 && m_Device->supportsVertexAmplificationCount(count); count++)
+        m_Desc.other.viewMaxNum = count;
     m_Desc.other.drawIndirectMaxNum = UINT32_MAX;
     m_Desc.other.samplerAnisotropyMax = 16.0f;
     m_Desc.tiers.resourceBinding = 2;
@@ -251,6 +257,10 @@ void DeviceMetal::FillDesc(const AdapterDesc& adapterDesc) {
     m_Desc.tiers.sampleLocations = 1;
     m_Desc.features.descriptorHeap = true;
     m_Desc.features.swapChain = true;
+    m_Desc.features.waitableSwapChain = true;
+    m_Desc.features.presentFromCompute = true;
+    m_Desc.features.layerBasedMultiview = m_Desc.other.viewMaxNum > 1;
+    m_Desc.features.viewportBasedMultiview = m_Desc.other.viewMaxNum > 1;
     m_Desc.features.enhancedBarriers = true;
     m_Desc.features.getMemoryDesc2 = true;
     m_Desc.features.resourceAliasing = true;
@@ -281,6 +291,12 @@ void DeviceMetal::FillDesc(const AdapterDesc& adapterDesc) {
     m_Desc.shaderFeatures.nativeI16 = true;
     m_Desc.shaderFeatures.nativeF16 = true;
     m_Desc.shaderFeatures.nativeI64 = true;
+    m_Desc.shaderFeatures.atomicsF32 = true;
+    m_Desc.shaderFeatures.atomicsI64 = m_Device->supportsFamily(MTL::GPUFamilyApple9);
+    m_Desc.shaderFeatures.barycentric = true;
+    m_Desc.shaderFeatures.rasterizedOrderedView = true;
+    m_Desc.shaderFeatures.storageReadWithoutFormat = true;
+    m_Desc.shaderFeatures.storageWriteWithoutFormat = true;
     m_Desc.shaderFeatures.waveQuery = true;
     m_Desc.shaderFeatures.waveVote = true;
     m_Desc.shaderFeatures.waveShuffle = true;
@@ -295,10 +311,12 @@ void DeviceMetal::FillDesc(const AdapterDesc& adapterDesc) {
     m_Desc.features.shaderBytecodeDXIL = true;
     m_Desc.features.geometryShader = true;
     m_Desc.features.tessellationShader = true;
+#else
+    m_Desc.features.flexibleMultiview = m_Desc.other.viewMaxNum > 1;
 #endif
     // Metal 4 address-driven AS builds require Apple9, unlike legacy supportsRaytracing.
     if (m_Device->supportsFamily(MTL::GPUFamilyApple9)) {
-        m_Desc.tiers.rayTracing = 1;
+        m_Desc.tiers.rayTracing = 2;
         m_Desc.memoryAlignment.scratchBufferOffset = 256;
         m_Desc.memoryAlignment.shaderBindingTable = 64;
         m_Desc.shaderStage.rayTracing.shaderGroupIdentifierSize = 32;

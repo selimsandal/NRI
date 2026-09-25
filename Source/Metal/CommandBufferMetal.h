@@ -179,6 +179,7 @@ private:
     MTL::StoreAction m_DepthStore = MTL::StoreActionDontCare, m_StencilStore = MTL::StoreActionDontCare;
     MTL::PixelFormat m_RenderDepth = MTL::PixelFormatInvalid, m_RenderStencil = MTL::PixelFormatInvalid;
     uint32_t m_RenderWidth = 0, m_RenderHeight = 0;
+    uint32_t m_ViewMask = 0;
     uint8_t m_RenderColorNum = 0, m_RenderSampleNum = 1;
     MTL::VisibilityResultMode m_VisibilityMode = MTL::VisibilityResultModeDisabled;
     uint64_t m_VisibilityOffset = 0;

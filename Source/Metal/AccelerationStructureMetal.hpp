@@ -18,6 +18,24 @@ static MTL::AccelerationStructureUsage GetAccelerationStructureUsageMetal(Accele
 
 static MTL::AttributeFormat GetAccelerationStructureVertexFormatMetal(Format format) {
     switch (format) {
+        case Format::RG8_UNORM:
+            return MTL::AttributeFormatUChar2Normalized;
+        case Format::RG8_SNORM:
+            return MTL::AttributeFormatChar2Normalized;
+        case Format::RGBA8_UNORM:
+            return MTL::AttributeFormatUChar4Normalized;
+        case Format::RGBA8_SNORM:
+            return MTL::AttributeFormatChar4Normalized;
+        case Format::RG16_UNORM:
+            return MTL::AttributeFormatUShort2Normalized;
+        case Format::RGBA16_UNORM:
+            return MTL::AttributeFormatUShort4Normalized;
+        case Format::RG16_SNORM:
+            return MTL::AttributeFormatShort2Normalized;
+        case Format::RGBA16_SNORM:
+            return MTL::AttributeFormatShort4Normalized;
+        case Format::R10_G10_B10_A2_UNORM:
+            return MTL::AttributeFormatUInt1010102Normalized;
         case Format::RG16_SFLOAT:
             return MTL::AttributeFormatHalf2;
         case Format::RGBA16_SFLOAT:

@@ -10,6 +10,13 @@ struct NriDescriptorEntry {
     ulong metadata; // buffer byte size, or sampler mip bias in the low 32 bits
 };
 
+// For native multiview shaders, bind at buffer(3). Index with [[amplification_id]]
+// to obtain the NRI view index, including sparse masks. Flexible multiview shaders
+// write [[render_target_array_index]] and/or [[viewport_array_index]] explicitly.
+struct NriMultiview {
+    uint viewIndices[32];
+};
+
 // Root constants, descriptors, and descriptor-table pointers are packed from
 // byte offset zero in the buffer bound at buffer(2). After root constants, NRI
 // aligns to 8 bytes and packs 64-bit root-descriptor addresses, then pointers to
@@ -78,7 +85,8 @@ struct NriRayDispatchDesc {
 // and function-table fields in the shader's argument-buffer structure to use them.
 // Byte offsets: dispatch 0, root 104, resources 112, samplers 120,
 // visibleFunctions 128, intersectionFunctions 136, intersectionTables 144.
-// intersectionTables and the last two shader-identifier fields are currently zero.
+// This ABI uses the single intersectionFunctions table. intersectionTables is the
+// optional multiple-table ABI and remains zero, as do the last two identifier fields.
 // NRISamples/Shaders/MetalTests.metal contains a native dispatch fixture; it tests
 // dispatch and shader-record selection, not acceleration-structure traversal.
 struct NriRayDispatchArguments {

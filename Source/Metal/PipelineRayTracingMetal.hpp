@@ -30,6 +30,11 @@ Result PipelineMetal::Create(const RayTracingPipelineDesc& desc) {
     NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
     m_Layout = (const PipelineLayoutMetal*)desc.pipelineLayout;
     const ShaderLibraryDesc& shaderLibrary = *desc.shaderLibrary;
+    bool hasConvertedShaders = false;
+    for (uint32_t i = 0; i < shaderLibrary.shaderNum; i++) {
+        const ShaderDesc& shader = shaderLibrary.shaders[i];
+        hasConvertedShaders |= shader.size >= 4 && memcmp(shader.bytecode, "DXBC", 4) == 0;
+    }
     Vector<MTL::Library*> libraries(m_Device.GetStdAllocator());
     Vector<MTL::Function*> functions(m_Device.GetStdAllocator());
     libraries.resize(shaderLibrary.shaderNum + desc.shaderGroupNum, nullptr);
@@ -188,11 +193,15 @@ Result PipelineMetal::Create(const RayTracingPipelineDesc& desc) {
     MTL::Library* dispatchLibrary = nullptr;
     MTL::Function* dispatchFunction = nullptr;
     if (result == Result::SUCCESS && !loadCompanion("RaygenIndirection", dispatchLibrary, dispatchFunction)) {
+        if (!hasConvertedShaders)
+            result = Result::UNSUPPORTED;
 #if NRI_ENABLE_METAL_SHADER_CONVERTER
-        IRMetalLibBinary* binary = IRMetalLibBinaryCreate();
-        if (!IRMetalLibSynthesizeIndirectRayDispatchFunction(compiler, binary) || !loadBinary(binary, "RaygenIndirection", dispatchLibrary, dispatchFunction))
-            result = Result::FAILURE;
-        IRMetalLibBinaryDestroy(binary);
+        else {
+            IRMetalLibBinary* binary = IRMetalLibBinaryCreate();
+            if (!IRMetalLibSynthesizeIndirectRayDispatchFunction(compiler, binary) || !loadBinary(binary, "RaygenIndirection", dispatchLibrary, dispatchFunction))
+                result = Result::FAILURE;
+            IRMetalLibBinaryDestroy(binary);
+        }
 #else
         result = Result::UNSUPPORTED;
 #endif
@@ -210,6 +219,8 @@ Result PipelineMetal::Create(const RayTracingPipelineDesc& desc) {
     auto synthesizeIntersection = [&](bool procedural, const char* name, MTL::Library*& library, MTL::Function*& function) {
         if (loadCompanion(name, library, function))
             return true;
+        if (!hasConvertedShaders)
+            return false;
 #if NRI_ENABLE_METAL_SHADER_CONVERTER
         IRCompilerSetHitgroupType(compiler, procedural ? IRHitGroupTypeProceduralPrimitive : IRHitGroupTypeTriangles);
         IRMetalLibBinary* binary = IRMetalLibBinaryCreate();

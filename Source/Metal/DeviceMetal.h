@@ -44,6 +44,7 @@ struct DeviceMetal final : public DeviceBase {
     Result FillFunctionTable(MeshShaderInterface& table) const override;
     Result FillFunctionTable(RayTracingInterface& table) const override;
     Result FillFunctionTable(DescriptorHeapInterface& table) const override;
+    Result FillFunctionTable(UpscalerInterface& table) const override;
     Result FillFunctionTable(WrapperMetalInterface& table) const override;
 #if NRI_ENABLE_IMGUI_EXTENSION
     Result FillFunctionTable(ImguiInterface& table) const override;

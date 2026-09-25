@@ -2,6 +2,10 @@
 
 #pragma once
 
+#include <chrono>
+#include <condition_variable>
+#include <memory>
+
 namespace nri {
 
 struct SwapChainMetal final {
@@ -23,6 +27,13 @@ struct SwapChainMetal final {
     Result GetDisplayDesc(DisplayDesc& desc);
 
 private:
+    struct PresentationState {
+        std::mutex lock;
+        std::condition_variable conditionVariable;
+        uint64_t completedPresentId = 0;
+        bool isShuttingDown = false;
+    };
+
     DeviceMetal& m_Device;
     QueueMetal* m_Queue = nullptr;
     CA::MetalLayer* m_Layer = nullptr;
@@ -31,7 +42,8 @@ private:
     Vector<TextureMetal*> m_Textures;
     TextureDesc m_TextureDesc = {};
     uint32_t m_Current = 0;
-    uint64_t m_LastPresentId = 0;
+    bool m_IsWaitable = false;
+    std::shared_ptr<PresentationState> m_PresentationState = std::make_shared<PresentationState>();
 };
 
 } // namespace nri
