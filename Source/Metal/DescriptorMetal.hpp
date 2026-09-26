@@ -119,16 +119,29 @@ Result DescriptorMetal::Create(const SamplerDesc& desc) {
     d->setCompareFunction(GetCompareMetal(desc.compareOp));
     d->setNormalizedCoordinates(!desc.unnormalizedCoordinates);
     d->setSupportArgumentBuffers(true);
-    const bool white = desc.isInteger ? desc.borderColor.ui.x == 1 && desc.borderColor.ui.y == 1 && desc.borderColor.ui.z == 1 : desc.borderColor.f.x == 1.0f && desc.borderColor.f.y == 1.0f && desc.borderColor.f.z == 1.0f;
-    const bool opaque = desc.isInteger ? desc.borderColor.ui.w == 1 : desc.borderColor.f.w == 1.0f;
+    const bool usesBorder = desc.addressModes.u == AddressMode::CLAMP_TO_BORDER || desc.addressModes.v == AddressMode::CLAMP_TO_BORDER || desc.addressModes.w == AddressMode::CLAMP_TO_BORDER;
+    if (usesBorder) {
+        const bool transparentBlack = desc.isInteger ? desc.borderColor.ui.x == 0 && desc.borderColor.ui.y == 0 && desc.borderColor.ui.z == 0 && desc.borderColor.ui.w == 0 : desc.borderColor.f.x == 0.0f && desc.borderColor.f.y == 0.0f && desc.borderColor.f.z == 0.0f && desc.borderColor.f.w == 0.0f;
+        const bool opaqueBlack = desc.isInteger ? desc.borderColor.ui.x == 0 && desc.borderColor.ui.y == 0 && desc.borderColor.ui.z == 0 && desc.borderColor.ui.w == 1 : desc.borderColor.f.x == 0.0f && desc.borderColor.f.y == 0.0f && desc.borderColor.f.z == 0.0f && desc.borderColor.f.w == 1.0f;
+        const bool opaqueWhite = desc.isInteger ? desc.borderColor.ui.x == 1 && desc.borderColor.ui.y == 1 && desc.borderColor.ui.z == 1 && desc.borderColor.ui.w == 1 : desc.borderColor.f.x == 1.0f && desc.borderColor.f.y == 1.0f && desc.borderColor.f.z == 1.0f && desc.borderColor.f.w == 1.0f;
 
-    if (white && opaque)
-        d->setBorderColor(MTL::SamplerBorderColorOpaqueWhite);
-    else if (opaque)
-        d->setBorderColor(MTL::SamplerBorderColorOpaqueBlack);
-    else
-        d->setBorderColor(MTL::SamplerBorderColorTransparentBlack);
-    m_SamplerBias = desc.mipBias;
+        if (opaqueWhite)
+            d->setBorderColor(MTL::SamplerBorderColorOpaqueWhite);
+        else if (opaqueBlack)
+            d->setBorderColor(MTL::SamplerBorderColorOpaqueBlack);
+        else if (transparentBlack)
+            d->setBorderColor(MTL::SamplerBorderColorTransparentBlack);
+        else {
+            d->release();
+
+            return Result::UNSUPPORTED;
+        }
+    }
+
+    const bool nativeLodBias = m_Device.GetNativeObject()->supportsFamily(MTL::GPUFamilyApple10);
+    if (nativeLodBias)
+        d->setLodBias(desc.mipBias);
+    m_SamplerBias = nativeLodBias ? 0.0f : desc.mipBias;
     m_Sampler = m_Device.GetNativeObject()->newSamplerState(d);
     d->release();
 

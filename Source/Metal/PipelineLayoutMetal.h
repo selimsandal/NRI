@@ -15,6 +15,10 @@ struct PipelineLayoutMetal final : public DebugNameBase {
     uint32_t GetRootDataSize() const;
     uint32_t GetRootConstantOffset(uint32_t index) const;
     uint32_t GetRootDescriptorOffset(uint32_t index) const;
+    uint32_t GetDrawParametersOffset() const;
+    uint32_t GetDrawIndexOffset() const;
+    bool IsDrawParametersEmulationEnabled() const;
+    bool IsDrawIndexEmulationEnabled() const;
     void GetSetRootOffsets(uint32_t index, uint32_t& resource, uint32_t& sampler) const;
     const DescriptorSetMappingMetal& GetDescriptorSetMapping(uint32_t index) const;
     void InitRootData(void* data) const;
@@ -34,6 +38,8 @@ private:
     Vector<DescriptorMetal*> m_RootSamplers;
     MTL::Buffer* m_RootSamplerBuffer = nullptr;
     uint32_t m_RootSamplerOffset = UINT32_MAX;
+    uint32_t m_DrawParametersOffset = UINT32_MAX;
+    uint32_t m_DrawIndexOffset = UINT32_MAX;
     uint32_t m_RootDataSize = 0;
 #if NRI_ENABLE_METAL_SHADER_CONVERTER
     IRRootSignature* m_RootSignature = nullptr;

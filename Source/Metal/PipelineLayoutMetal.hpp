@@ -32,6 +32,27 @@ Result PipelineLayoutMetal::Create(const PipelineLayoutDesc& desc) {
         rangeNum += desc.descriptorSets[i].rangeNum;
 
     ranges.reserve(rangeNum);
+
+    const bool vertexStage = (desc.shaderStages & StageBits::VERTEX_SHADER) != 0;
+    if ((desc.flags & PipelineLayoutBits::ENABLE_DRAW_PARAMETERS_EMULATION) && vertexStage) {
+        m_DrawParametersOffset = offset;
+        offset += 8;
+        IRRootParameter1 parameter = {};
+        parameter.ParameterType = IRRootParameterType32BitConstants;
+        parameter.Constants = {0, 999, 2};
+        parameter.ShaderVisibility = IRShaderVisibilityVertex;
+        parameters.push_back(parameter);
+    }
+
+    if ((desc.flags & PipelineLayoutBits::ENABLE_DRAW_INDEX_EMULATION) && vertexStage) {
+        m_DrawIndexOffset = offset;
+        offset += 4;
+        IRRootParameter1 parameter = {};
+        parameter.ParameterType = IRRootParameterType32BitConstants;
+        parameter.Constants = {1, 999, 1};
+        parameter.ShaderVisibility = IRShaderVisibilityVertex;
+        parameters.push_back(parameter);
+    }
 #endif
 
     for (uint32_t i = 0; i < desc.rootConstantNum; i++) {
@@ -215,6 +236,22 @@ uint32_t PipelineLayoutMetal::GetRootConstantOffset(uint32_t index) const {
 
 uint32_t PipelineLayoutMetal::GetRootDescriptorOffset(uint32_t index) const {
     return m_DescriptorOffsets[index];
+}
+
+uint32_t PipelineLayoutMetal::GetDrawParametersOffset() const {
+    return m_DrawParametersOffset;
+}
+
+uint32_t PipelineLayoutMetal::GetDrawIndexOffset() const {
+    return m_DrawIndexOffset;
+}
+
+bool PipelineLayoutMetal::IsDrawParametersEmulationEnabled() const {
+    return m_DrawParametersOffset != UINT32_MAX;
+}
+
+bool PipelineLayoutMetal::IsDrawIndexEmulationEnabled() const {
+    return m_DrawIndexOffset != UINT32_MAX;
 }
 
 void PipelineLayoutMetal::GetSetRootOffsets(uint32_t index, uint32_t& resource, uint32_t& sampler) const {

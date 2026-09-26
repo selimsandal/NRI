@@ -126,10 +126,11 @@ private:
     State& GetState(BindPoint bindPoint);
     void ApplyRasterState();
     void SetDrawArguments(const void* data, uint64_t size, bool indexed);
+    MTL::GPUAddress PrepareIndirectDrawRoots(MTL::GPUAddress arguments, uint32_t drawNum, uint32_t stride);
 #if NRI_ENABLE_METAL_SHADER_CONVERTER
     IRRuntimeDrawInfo PrepareEmulationDraw(bool indexed, MTL::Size& objectThreads, MTL::Size& meshThreads);
     void DrawEmulated(const void* arguments, uint64_t size, bool indexed, uint32_t vertexNum, uint32_t instanceNum);
-    void DrawEmulatedIndirect(MTL::GPUAddress arguments, uint32_t drawNum, uint32_t stride, bool indexed);
+    void DrawEmulatedIndirect(MTL::GPUAddress arguments, MTL::GPUAddress roots, uint32_t drawNum, uint32_t stride, bool indexed);
 #endif
     bool CreateRayTracingKernels();
     MTL::GPUAddress SetRayDispatchArguments(const DispatchRaysIndirectDesc& desc);
@@ -151,6 +152,7 @@ private:
     MTL::ComputePipelineState* m_CopyRayArguments = nullptr;
     MTL::ComputePipelineState* m_FilterDrawArguments = nullptr;
     MTL::ComputePipelineState* m_EmulateDrawArguments = nullptr;
+    MTL::ComputePipelineState* m_PrepareDrawRoots = nullptr;
     DescriptorPoolMetal* m_DescriptorPool = nullptr;
     const PipelineMetal* m_Pipeline = nullptr;
     bool m_RenderPipelineDirty = true;
@@ -167,6 +169,7 @@ private:
     MTL::SamplePosition m_SamplePositions[16] = {};
     uint8_t m_SamplePositionNum = 0;
     MTL::GPUAddress m_IndexAddress = 0;
+    MTL::GPUAddress m_DrawRootAddress = 0;
     uint64_t m_IndexLength = 0;
     MTL::IndexType m_IndexType = MTL::IndexTypeUInt16;
 #if NRI_ENABLE_METAL_SHADER_CONVERTER

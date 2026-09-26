@@ -156,10 +156,11 @@ void DeviceMetal::FillDesc(const AdapterDesc& adapterDesc) {
     m_Desc.viewport.maxNum = 16;
     m_Desc.viewport.boundsMin = -32768;
     m_Desc.viewport.boundsMax = 32767;
-    m_Desc.dimensions.attachmentMaxDim = 16384;
+    const uint32_t textureMaxDim = m_Device->supportsFamily(MTL::GPUFamilyApple10) ? 32768 : 16384;
+    m_Desc.dimensions.attachmentMaxDim = textureMaxDim;
     m_Desc.dimensions.attachmentLayerMaxNum = 2048;
-    m_Desc.dimensions.texture1DMaxDim = 16384;
-    m_Desc.dimensions.texture2DMaxDim = 16384;
+    m_Desc.dimensions.texture1DMaxDim = textureMaxDim;
+    m_Desc.dimensions.texture2DMaxDim = textureMaxDim;
     m_Desc.dimensions.texture3DMaxDim = 2048;
     m_Desc.dimensions.textureLayerMaxNum = 2048;
     m_Desc.dimensions.typedBufferMaxDim = 256 * 1024 * 1024;
@@ -238,7 +239,7 @@ void DeviceMetal::FillDesc(const AdapterDesc& adapterDesc) {
     m_Desc.shaderStage.mesh.workGroupMaxDim[2] = (uint32_t)maxThreads.depth;
     m_Desc.shaderStage.mesh.sharedMemoryMaxSize = 32 * 1024;
     m_Desc.shaderStage.mesh.outputVerticesMaxNum = 256;
-    m_Desc.shaderStage.mesh.outputPrimitiveMaxNum = 256;
+    m_Desc.shaderStage.mesh.outputPrimitiveMaxNum = 512;
     // Apple7/Apple8 limit mesh grids to 1024 threadgroups per draw.
     m_Desc.shaderStage.mesh.dispatchWorkGroupMaxNum = m_Device->supportsFamily(MTL::GPUFamilyApple10) ? 4194303 : (m_Device->supportsFamily(MTL::GPUFamilyApple9) ? 1048575 : 1024);
     m_Desc.wave.laneMinNum = 32;
@@ -277,7 +278,8 @@ void DeviceMetal::FillDesc(const AdapterDesc& adapterDesc) {
     m_Desc.features.textureCompressionETC2 = true;
     m_Desc.features.textureCompressionASTC = true;
     m_Desc.features.shaderBytecodeMETALLIB = true;
-    m_Desc.features.meshShader = true;
+    // NRI mesh support includes indirect draws, which require Apple9.
+    m_Desc.features.meshShader = m_Device->supportsFamily(MTL::GPUFamilyApple9);
     m_Desc.features.drawIndirectCount = true;
     m_Desc.features.occlusion = true;
     m_Desc.features.timestamp = true;
@@ -285,7 +287,14 @@ void DeviceMetal::FillDesc(const AdapterDesc& adapterDesc) {
     m_Desc.features.calibratedTimestamps = true;
     m_Desc.features.pipelineCache = true;
     m_Desc.features.pipelineCacheControl = true;
+    m_Desc.features.extendedDynamicState = true;
+    m_Desc.features.mutableDescriptorType = true;
     m_Desc.other.timestampFrequencyHz = 1000000000;
+    m_Desc.other.texelOffsetMin = -8;
+    m_Desc.other.texelOffsetMax = 7;
+    m_Desc.other.texelGatherOffsetMin = -8;
+    m_Desc.other.texelGatherOffsetMax = 7;
+    m_Desc.other.samplerLodBiasMax = 15.984375f; // Largest positive S4.6 native sampler bias.
     // Metal 4 devices meet Apple7's baseline; Converter also supports these
     // scalar types and SM6 wave/packed-dot intrinsics.
     m_Desc.shaderFeatures.nativeI16 = true;
@@ -305,13 +314,18 @@ void DeviceMetal::FillDesc(const AdapterDesc& adapterDesc) {
     m_Desc.shaderFeatures.waveQuad = true;
     m_Desc.shaderFeatures.integerDotProduct = true;
     m_Desc.shaderFeatures.unnormalizedCoordinates = true;
+    m_Desc.shaderFeatures.viewportIndex = true;
+    m_Desc.shaderFeatures.layerIndex = true;
     m_Desc.features.flexibleMultiview = m_Desc.other.viewMaxNum > 1;
 #if NRI_ENABLE_METAL_SHADER_CONVERTER
     // Converter stage-in attributes start at slot 11 in Metal's 31-entry descriptor.
     m_Desc.shaderStage.vertex.attributeMaxNum = 20;
     m_Desc.features.shaderBytecodeDXIL = true;
-    m_Desc.features.geometryShader = true;
-    m_Desc.features.tessellationShader = true;
+    // Converter GS/TS indirect draws use indirect mesh commands too.
+    m_Desc.features.geometryShader = m_Desc.features.meshShader;
+    m_Desc.features.tessellationShader = m_Desc.features.meshShader;
+    m_Desc.shaderFeatures.drawParameters = true;
+    m_Desc.shaderFeatures.drawIndex = true;
 #endif
     // Metal 4 address-driven AS builds require Apple9, unlike legacy supportsRaytracing.
     if (m_Device->supportsFamily(MTL::GPUFamilyApple9)) {

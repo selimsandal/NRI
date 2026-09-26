@@ -138,6 +138,7 @@ Result PipelineMetal::LoadFunction(const ShaderDesc& shader, MTL::Library*& libr
             return Result::UNSUPPORTED;
         IRObject* input = IRObjectCreateFromDXIL((const uint8_t*)shader.bytecode, shader.size, IRBytecodeOwnershipNone);
         IRCompiler* compiler = IRCompilerCreate();
+        IRCompilerSetCompatibilityFlags(compiler, IRCompatibilityFlagSamplerLODBias);
         IRCompilerSetGlobalRootSignature(compiler, m_Layout->GetRootSignature());
         IRCompilerEnableGeometryAndTessellationEmulation(compiler, emulation);
         IRCompilerSetSampleMask(compiler, sampleMask == ALL ? UINT32_MAX : sampleMask);
@@ -351,6 +352,13 @@ Result PipelineMetal::Create(const GraphicsPipelineDesc& desc) {
         hasFragment |= desc.shaders[i].stage == StageBits::FRAGMENT_SHADER;
     }
 
+    const auto& features = m_Device.GetDesc().features;
+    if ((isMesh && !features.meshShader) || (hasGeometry && !features.geometryShader) || (hasTessellation && !features.tessellationShader)) {
+        pool->release();
+
+        return Result::UNSUPPORTED;
+    }
+
     // Converter does not implement SV_ViewID, and its stage-emulation ABI is not
     // the native MSL mesh/object ABI. Do not silently route native stages through it.
     if ((hasConvertedShaders && m_ViewMask && m_Multiview == Multiview::FLEXIBLE) || (hasNativeShaders && (hasGeometry || hasTessellation))) {
@@ -368,12 +376,6 @@ Result PipelineMetal::Create(const GraphicsPipelineDesc& desc) {
     m_GeometryEmulation = hasGeometry;
     m_TessellationEmulation = hasTessellation;
     m_TessellationConfig.gsInstanceCount = 1;
-    if (desc.vertexInput) {
-        for (uint32_t i = 0; i < desc.vertexInput->streamNum; i++) {
-            const VertexStreamDesc& stream = desc.vertexInput->streams[i];
-            m_VertexStrides[stream.bindingSlot] = stream.stride;
-        }
-    }
     isMesh |= hasGeometry || hasTessellation;
     if (desc.inputAssembly.topology == Topology::TRIANGLE_STRIP_WITH_ADJACENCY) {
         pool->release();
@@ -480,7 +482,7 @@ Result PipelineMetal::Create(const GraphicsPipelineDesc& desc) {
         for (uint32_t i = 0; i < desc.vertexInput->streamNum; i++) {
             const VertexStreamDesc& source = desc.vertexInput->streams[i];
             MTL::VertexBufferLayoutDescriptor* layout = vertex->layouts()->object(source.bindingSlot + 6);
-            layout->setStride(source.stride);
+            layout->setStride(MTL::BufferLayoutStrideDynamic);
             layout->setStepFunction(source.stepRate == VertexStreamStepRate::PER_INSTANCE ? MTL::VertexStepFunctionPerInstance : MTL::VertexStepFunctionPerVertex);
             layout->setStepRate(1);
         }
@@ -779,10 +781,6 @@ const IRRuntimeTessellationPipelineConfig& PipelineMetal::GetTessellationConfig(
 
 IRRuntimePrimitiveType PipelineMetal::GetEmulationPrimitive() const {
     return m_EmulationPrimitive;
-}
-
-uint32_t PipelineMetal::GetVertexStride(uint32_t bindingSlot) const {
-    return m_VertexStrides[bindingSlot];
 }
 #endif
 

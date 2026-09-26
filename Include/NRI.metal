@@ -10,6 +10,17 @@ struct NriDescriptorEntry {
     ulong metadata; // buffer byte size, or sampler mip bias in the low 32 bits
 };
 
+// Pass this value as metal::bias to implicit-LOD native sampling operations.
+// Apple10 applies sampler bias natively and stores zero here to avoid doubling it.
+inline float NriGetSamplerMipBias(ulong metadata) {
+    return as_type<float>(uint(metadata));
+}
+
+// Native [[vertex_id]]/[[instance_id]] include the base vertex/instance. Subtract
+// [[base_vertex]]/[[base_instance]] for the zero-based HLSL/NRI IDs. Converted
+// shaders using NRI_BASE_VERTEX/NRI_BASE_INSTANCE must request explicit emulation
+// and target SM6.7 or earlier: Converter does not implement SM6.8 base intrinsics.
+
 // For native multiview shaders, bind at buffer(3). Index with [[amplification_id]]
 // to obtain the NRI view index, including sparse masks. Flexible multiview shaders
 // write [[render_target_array_index]] and/or [[viewport_array_index]] explicitly.
@@ -26,6 +37,8 @@ struct NriMultiview {
 // range follows them. Range offsets do not depend on the allocated variable count.
 // Direct heaps are not fields of this root buffer. Buffers 4 and 5 are reserved
 // for converted-shader draw metadata; vertex streams use buffer(6 + bindingSlot).
+// Converted draw emulation prepends two uints for ENABLE_DRAW_PARAMETERS_EMULATION
+// and one uint for ENABLE_DRAW_INDEX_EMULATION before application root constants.
 //
 // NRI 1D textures are height-one Metal 2D textures. Use texture2d/texture2d_array,
 // integer Y = 0 for reads/writes, and normalized Y = 0.5 for sampling.

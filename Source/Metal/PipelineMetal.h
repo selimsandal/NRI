@@ -51,7 +51,6 @@ struct PipelineMetal final : public DebugNameBase {
     const IRRuntimeGeometryPipelineConfig& GetGeometryConfig() const;
     const IRRuntimeTessellationPipelineConfig& GetTessellationConfig() const;
     IRRuntimePrimitiveType GetEmulationPrimitive() const;
-    uint32_t GetVertexStride(uint32_t bindingSlot) const;
 #endif
     const PipelineLayoutMetal& GetLayout() const;
     void SetDebugName(const char* name) NRI_DEBUG_NAME_OVERRIDE;
@@ -83,7 +82,6 @@ private:
     IRRuntimeGeometryPipelineConfig m_GeometryConfig = {};
     IRRuntimeTessellationPipelineConfig m_TessellationConfig = {};
     IRRuntimePrimitiveType m_EmulationPrimitive = IRRuntimePrimitiveTypeTriangle;
-    uint16_t m_VertexStrides[31] = {};
     bool m_GeometryEmulation = false;
     bool m_TessellationEmulation = false;
 #endif

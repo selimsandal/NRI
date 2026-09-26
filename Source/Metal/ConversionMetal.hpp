@@ -219,7 +219,7 @@ MTL::VertexFormat nri::GetVertexFormatMetal(Format format) {
     }
 }
 
-nri::FormatSupportBits nri::GetFormatSupportMetal(const MTL::Device& device, Format format) {
+nri::FormatSupportBits nri::GetFormatSupportMetal(MTL::Device& device, Format format) {
     MTL::PixelFormat pixelFormat = GetPixelFormatMetal(format);
     MTL::VertexFormat vertexFormat = GetVertexFormatMetal(format);
 
@@ -242,8 +242,15 @@ nri::FormatSupportBits nri::GetFormatSupportMetal(const MTL::Device& device, For
         support |= FormatSupportBits::BUFFER | FormatSupportBits::STORAGE_BUFFER;
 
     const bool depth = format == Format::D16_UNORM || format == Format::D32_SFLOAT || format == Format::D32_SFLOAT_S8_UINT;
+    FormatSupportBits multisample = FormatSupportBits::UNSUPPORTED;
+    if (device.supportsTextureSampleCount(2))
+        multisample |= FormatSupportBits::MULTISAMPLE_2X;
+    if (device.supportsTextureSampleCount(4))
+        multisample |= FormatSupportBits::MULTISAMPLE_4X;
+    if (device.supportsTextureSampleCount(8))
+        multisample |= FormatSupportBits::MULTISAMPLE_8X;
     if (depth) {
-        support |= FormatSupportBits::DEPTH_STENCIL_ATTACHMENT | FormatSupportBits::MULTISAMPLE_2X | FormatSupportBits::MULTISAMPLE_4X;
+        support |= FormatSupportBits::DEPTH_STENCIL_ATTACHMENT | multisample;
 
         return support;
     }
@@ -252,7 +259,7 @@ nri::FormatSupportBits nri::GetFormatSupportMetal(const MTL::Device& device, For
     if (!color)
         return support;
 
-    support |= FormatSupportBits::COLOR_ATTACHMENT | FormatSupportBits::MULTISAMPLE_2X | FormatSupportBits::MULTISAMPLE_4X | FormatSupportBits::HOST_COPY;
+    support |= FormatSupportBits::COLOR_ATTACHMENT | multisample | FormatSupportBits::HOST_COPY;
 
     const bool integer = format == Format::R8_UINT || format == Format::R8_SINT || format == Format::RG8_UINT || format == Format::RG8_SINT || format == Format::RGBA8_UINT || format == Format::RGBA8_SINT || format == Format::R16_UINT || format == Format::R16_SINT || format == Format::RG16_UINT || format == Format::RG16_SINT || format == Format::RGBA16_UINT || format == Format::RGBA16_SINT || format == Format::R32_UINT || format == Format::R32_SINT || format == Format::RG32_UINT || format == Format::RG32_SINT || format == Format::RGBA32_UINT || format == Format::RGBA32_SINT || format == Format::R10_G10_B10_A2_UINT;
     const bool float32 = format == Format::R32_SFLOAT || format == Format::RG32_SFLOAT || format == Format::RGBA32_SFLOAT;

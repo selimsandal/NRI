@@ -67,6 +67,9 @@ Draw parameters:
     - to enable emulation:
       - set "ENABLE_DRAW_PARAMETERS_EMULATION" and/or "ENABLE_DRAW_INDEX_EMULATION" for a corresponding "PipelineLayout"
       - define "NRI_ENABLE_DRAW_PARAMETERS_EMULATION" and/or "NRI_ENABLE_DRAW_INDEX_EMULATION" prior inclusion of "NRI.hlsl"
+  - Metal Shader Converter:
+    - use the same explicit emulation flags and defines as D3D12
+    - target SM < 6.8 for draw-base macros; Converter does not implement the SM 6.8 base intrinsics
 */
 
 // Compiler detection

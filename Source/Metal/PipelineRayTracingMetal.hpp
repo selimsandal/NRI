@@ -71,6 +71,7 @@ Result PipelineMetal::Create(const RayTracingPipelineDesc& desc) {
     IRRayTracingPipelineConfigurationSetPipelineFlags(configuration, flags);
 
     IRCompiler* compiler = IRCompilerCreate();
+    IRCompilerSetCompatibilityFlags(compiler, IRCompatibilityFlagSamplerLODBias);
     IRCompilerSetGlobalRootSignature(compiler, m_Layout->GetRootSignature());
     IRCompilerSetRayTracingPipelineConfiguration(compiler, configuration);
     IRCompilerSetMinimumGPUFamily(compiler, IRGPUFamilyApple7); // M2 and newer.

@@ -23,6 +23,8 @@ CommandBufferMetal::~CommandBufferMetal() {
         m_FilterDrawArguments->release();
     if (m_EmulateDrawArguments)
         m_EmulateDrawArguments->release();
+    if (m_PrepareDrawRoots)
+        m_PrepareDrawRoots->release();
     if (m_Arguments)
         m_Arguments->release();
     if (m_ClearStorageArguments)
@@ -48,6 +50,7 @@ Result CommandBufferMetal::Create(const CommandAllocator& allocator) {
 
 Result CommandBufferMetal::Begin(const DescriptorPool* pool) {
     m_Result = Result::SUCCESS;
+    m_DrawRootAddress = 0;
     m_Pipeline = nullptr;
     m_RenderEncoder = nullptr;
     m_ComputeEncoder = nullptr;
@@ -458,9 +461,10 @@ void CommandBufferMetal::BindArguments(BindPoint point) {
     }
 
     State& s = point == BindPoint::GRAPHICS ? m_Graphics : m_Compute;
-    MTL::GPUAddress root = 0;
+    MTL::GPUAddress root = m_DrawRootAddress;
+    m_DrawRootAddress = 0;
     if (s.layout && !s.root.empty())
-        root = m_Allocator->Upload(s.root.data(), s.root.size());
+        root = root ? root : m_Allocator->Upload(s.root.data(), s.root.size());
     if (m_DescriptorPool) {
         m_Arguments->setAddress(m_DescriptorPool->GetResourceHeapAddress(), 0);
         m_Arguments->setAddress(m_DescriptorPool->GetSamplerHeapAddress(), 1);
@@ -636,6 +640,7 @@ void CommandBufferMetal::CmdClearAttachments(const ClearAttachmentDesc* clears, 
 }
 
 void CommandBufferMetal::CmdDraw(const DrawDesc& d) {
+    SetDrawArguments(&d, sizeof(d), false);
 #if NRI_ENABLE_METAL_SHADER_CONVERTER
     if (m_Pipeline->IsGeometryEmulation() || m_Pipeline->IsTessellationEmulation()) {
         DrawEmulated(&d, sizeof(d), false, d.vertexNum, d.instanceNum);
@@ -643,12 +648,12 @@ void CommandBufferMetal::CmdDraw(const DrawDesc& d) {
         return;
     }
 #endif
-    SetDrawArguments(&d, sizeof(d), false);
     BindArguments(BindPoint::GRAPHICS);
     m_RenderEncoder->drawPrimitives(m_Pipeline->GetPrimitiveType(), d.baseVertex, d.vertexNum, d.instanceNum, d.baseInstance);
 }
 
 void CommandBufferMetal::CmdDrawIndexed(const DrawIndexedDesc& d) {
+    SetDrawArguments(&d, sizeof(d), true);
 #if NRI_ENABLE_METAL_SHADER_CONVERTER
     if (m_Pipeline->IsGeometryEmulation() || m_Pipeline->IsTessellationEmulation()) {
         DrawEmulated(&d, sizeof(d), true, d.indexNum, d.instanceNum);
@@ -656,21 +661,28 @@ void CommandBufferMetal::CmdDrawIndexed(const DrawIndexedDesc& d) {
         return;
     }
 #endif
-    SetDrawArguments(&d, sizeof(d), true);
     BindArguments(BindPoint::GRAPHICS);
     uint64_t o = uint64_t(d.baseIndex) * (m_IndexType == MTL::IndexTypeUInt16 ? 2 : 4);
     m_RenderEncoder->drawIndexedPrimitives(m_Pipeline->GetPrimitiveType(), d.indexNum, m_IndexType, m_IndexAddress + o, m_IndexLength - o, d.instanceNum, d.baseVertex, d.baseInstance);
 }
 
 void CommandBufferMetal::CmdDrawIndirect(const Buffer& b, uint64_t o, uint32_t n, uint32_t s, const Buffer* c, uint64_t co) {
-    const MTL::GPUAddress address = PrepareIndirectArguments(b, o, n, s, sizeof(DrawDesc), c, co);
+    const bool emulatedParameters = m_Graphics.layout->IsDrawParametersEmulationEnabled();
+    const uint32_t argumentSize = emulatedParameters ? sizeof(DrawBaseDesc) : sizeof(DrawDesc);
+    MTL::GPUAddress address = PrepareIndirectArguments(b, o, n, s, argumentSize, c, co);
 
     if (!address)
         return;
 
+    const MTL::GPUAddress roots = PrepareIndirectDrawRoots(address, n, s);
+    if (m_Result != Result::SUCCESS)
+        return;
+
+    address += emulatedParameters ? 8 : 0;
+
 #if NRI_ENABLE_METAL_SHADER_CONVERTER
     if (m_Pipeline->IsGeometryEmulation() || m_Pipeline->IsTessellationEmulation()) {
-        DrawEmulatedIndirect(address, n, s, false);
+        DrawEmulatedIndirect(address, roots, n, s, false);
 
         return;
     }
@@ -683,6 +695,9 @@ void CommandBufferMetal::CmdDrawIndirect(const Buffer& b, uint64_t o, uint32_t n
     for (uint32_t i = 0; i < n; i++) {
         const MTL::GPUAddress arguments = address + uint64_t(i) * s;
 
+        if (roots)
+            m_DrawRootAddress = roots + uint64_t(i) * m_Graphics.layout->GetRootDataSize();
+
         if (m_Pipeline->IsConverted())
             m_Arguments->setAddress(arguments, 4);
 
@@ -692,14 +707,22 @@ void CommandBufferMetal::CmdDrawIndirect(const Buffer& b, uint64_t o, uint32_t n
 }
 
 void CommandBufferMetal::CmdDrawIndexedIndirect(const Buffer& b, uint64_t o, uint32_t n, uint32_t s, const Buffer* c, uint64_t co) {
-    const MTL::GPUAddress address = PrepareIndirectArguments(b, o, n, s, sizeof(DrawIndexedDesc), c, co);
+    const bool emulatedParameters = m_Graphics.layout->IsDrawParametersEmulationEnabled();
+    const uint32_t argumentSize = emulatedParameters ? sizeof(DrawIndexedBaseDesc) : sizeof(DrawIndexedDesc);
+    MTL::GPUAddress address = PrepareIndirectArguments(b, o, n, s, argumentSize, c, co);
 
     if (!address)
         return;
 
+    const MTL::GPUAddress roots = PrepareIndirectDrawRoots(address, n, s);
+    if (m_Result != Result::SUCCESS)
+        return;
+
+    address += emulatedParameters ? 8 : 0;
+
 #if NRI_ENABLE_METAL_SHADER_CONVERTER
     if (m_Pipeline->IsGeometryEmulation() || m_Pipeline->IsTessellationEmulation()) {
-        DrawEmulatedIndirect(address, n, s, true);
+        DrawEmulatedIndirect(address, roots, n, s, true);
 
         return;
     }
@@ -711,6 +734,9 @@ void CommandBufferMetal::CmdDrawIndexedIndirect(const Buffer& b, uint64_t o, uin
 
     for (uint32_t i = 0; i < n; i++) {
         const MTL::GPUAddress arguments = address + uint64_t(i) * s;
+
+        if (roots)
+            m_DrawRootAddress = roots + uint64_t(i) * m_Graphics.layout->GetRootDataSize();
 
         if (m_Pipeline->IsConverted())
             m_Arguments->setAddress(arguments, 4);
@@ -813,12 +839,92 @@ void CommandBufferMetal::CmdEndRendering() {
 }
 
 void CommandBufferMetal::SetDrawArguments(const void* data, uint64_t size, bool indexed) {
+    if (m_Graphics.layout->IsDrawParametersEmulationEnabled()) {
+        const uint32_t offset = m_Graphics.layout->GetDrawParametersOffset();
+        const uint32_t baseVertexOffset = indexed ? 12 : 8;
+        memcpy(m_Graphics.root.data() + offset, (const uint8_t*)data + baseVertexOffset, 8);
+    }
+
+    if (m_Graphics.layout->IsDrawIndexEmulationEnabled()) {
+        const uint32_t drawIndex = 0;
+        memcpy(m_Graphics.root.data() + m_Graphics.layout->GetDrawIndexOffset(), &drawIndex, sizeof(drawIndex));
+    }
+
     if (!m_Pipeline->IsConverted())
         return;
 
     uint16_t type = indexed ? (m_IndexType == MTL::IndexTypeUInt16 ? 1 : 2) : 0;
     m_Arguments->setAddress(m_Allocator->Upload(data, size), 4);
     m_Arguments->setAddress(m_Allocator->Upload(&type, sizeof(type)), 5);
+}
+
+MTL::GPUAddress CommandBufferMetal::PrepareIndirectDrawRoots(MTL::GPUAddress arguments, uint32_t drawNum, uint32_t stride) {
+    const bool parameters = m_Graphics.layout->IsDrawParametersEmulationEnabled();
+    const bool index = m_Graphics.layout->IsDrawIndexEmulationEnabled();
+
+    if (!parameters && !index)
+        return 0;
+
+    if (!m_PrepareDrawRoots) {
+        const char* source = R"(
+            #include <metal_stdlib>
+            using namespace metal;
+            struct Args { const device uint* source; const device uint* root; device uint* roots; uint drawNum; uint stride; uint rootWords; uint parameterOffset; uint indexOffset; };
+            kernel void prepare_draw_roots(constant Args& a [[buffer(0)]], uint i [[thread_position_in_grid]]) {
+                if (i >= a.drawNum) return;
+                for (uint j = 0; j < a.rootWords; j++) a.roots[i * a.rootWords + j] = a.root[j];
+                if (a.parameterOffset != ~0u) {
+                    a.roots[i * a.rootWords + a.parameterOffset] = a.source[i * a.stride];
+                    a.roots[i * a.rootWords + a.parameterOffset + 1] = a.source[i * a.stride + 1];
+                }
+                if (a.indexOffset != ~0u) a.roots[i * a.rootWords + a.indexOffset] = i;
+            })";
+        NS::Error* error = nullptr;
+        MTL::Library* library = m_Device.GetNativeObject()->newLibrary(NS::String::string(source, NS::UTF8StringEncoding), nullptr, &error);
+        MTL::Function* function = library ? library->newFunction(NS::String::string("prepare_draw_roots", NS::UTF8StringEncoding)) : nullptr;
+
+        if (function) {
+            m_PrepareDrawRoots = m_Device.GetNativeObject()->newComputePipelineState(function, &error);
+            function->release();
+        }
+
+        if (library)
+            library->release();
+
+        if (!m_PrepareDrawRoots) {
+            RecordFailure(Result::FAILURE);
+
+            return 0;
+        }
+    }
+
+    const uint32_t rootSize = m_Graphics.layout->GetRootDataSize();
+    const MTL::GPUAddress root = m_Allocator->Upload(m_Graphics.root.data(), rootSize);
+    const MTL::GPUAddress roots = m_Allocator->Upload(nullptr, uint64_t(drawNum) * rootSize);
+
+    struct Arguments {
+        MTL::GPUAddress source, root, roots;
+        uint32_t drawNum, stride, rootWords, parameterOffset, indexOffset;
+    } constants = {arguments, root, roots, drawNum, stride / 4, rootSize / 4, parameters ? m_Graphics.layout->GetDrawParametersOffset() / 4 : UINT32_MAX, index ? m_Graphics.layout->GetDrawIndexOffset() / 4 : UINT32_MAX};
+
+    const MTL::GPUAddress constantAddress = m_Allocator->Upload(&constants, sizeof(constants));
+
+    if (!root || !roots || !constantAddress) {
+        RecordFailure(Result::OUT_OF_MEMORY);
+
+        return 0;
+    }
+
+    SuspendRendering();
+    auto* encoder = BeginCompute();
+    encoder->barrierAfterQueueStages(MTL::StageAll, MTL::StageDispatch, MTL4::VisibilityOptionDevice);
+    m_ClearStorageArguments->setAddress(constantAddress, 0);
+    encoder->setArgumentTable(m_ClearStorageArguments);
+    encoder->setComputePipelineState(m_PrepareDrawRoots);
+    encoder->dispatchThreads(MTL::Size(drawNum, 1, 1), MTL::Size(64, 1, 1));
+    ResumeRendering();
+
+    return roots;
 }
 
 #if NRI_ENABLE_METAL_SHADER_CONVERTER
@@ -852,9 +958,6 @@ IRRuntimeDrawInfo CommandBufferMetal::PrepareEmulationDraw(bool indexed, MTL::Si
     meshGroup = MTL::Size(meshThreads, 1, 1);
     m_Arguments->setAddress(m_Allocator->Upload(&info, sizeof(info)), kIRArgumentBufferUniformsBindPoint);
 
-    for (uint32_t i = 0; i < GetCountOf(m_EmulationVertexBuffers); i++)
-        m_EmulationVertexBuffers[i].stride = m_Pipeline->GetVertexStride(i);
-
     m_Arguments->setAddress(m_Allocator->Upload(m_EmulationVertexBuffers, sizeof(m_EmulationVertexBuffers)), kIRVertexBufferBindPoint);
 
     return info;
@@ -878,7 +981,7 @@ void CommandBufferMetal::DrawEmulated(const void* arguments, uint64_t size, bool
     m_RenderEncoder->drawMeshThreadgroups(groups, objectThreads, meshThreads);
 }
 
-void CommandBufferMetal::DrawEmulatedIndirect(MTL::GPUAddress arguments, uint32_t drawNum, uint32_t stride, bool indexed) {
+void CommandBufferMetal::DrawEmulatedIndirect(MTL::GPUAddress arguments, MTL::GPUAddress roots, uint32_t drawNum, uint32_t stride, bool indexed) {
     if (!m_EmulateDrawArguments) {
         const char* source = R"(
             #include <metal_stdlib>
@@ -944,6 +1047,9 @@ void CommandBufferMetal::DrawEmulatedIndirect(MTL::GPUAddress arguments, uint32_
         m_RenderEncoder->setObjectThreadgroupMemoryLength(15360, 0);
 
     for (uint32_t i = 0; i < drawNum; i++) {
+        if (roots)
+            m_DrawRootAddress = roots + uint64_t(i) * m_Graphics.layout->GetRootDataSize();
+
         m_Arguments->setAddress(arguments + uint64_t(i) * stride, kIRArgumentBufferDrawArgumentsBindPoint);
         BindArguments(BindPoint::GRAPHICS);
         m_RenderEncoder->drawMeshThreadgroups(grids + uint64_t(i) * sizeof(DrawMeshTasksDesc), objectThreads, meshThreads);
