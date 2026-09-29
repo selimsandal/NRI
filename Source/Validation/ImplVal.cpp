@@ -2475,6 +2475,10 @@ static Result NRI_CALL CreateFenceMetal(Device& device, const FenceMetalDesc& de
     return ((DeviceVal&)device).CreateFence(desc, fence);
 }
 
+static Result NRI_CALL GetRootSignatureMetal(const PipelineLayout& pipelineLayout, char* json, uint64_t& size) {
+    return GetDeviceVal(pipelineLayout).GetRootSignature(pipelineLayout, json, size);
+}
+
 #endif
 
 Result DeviceVal::FillFunctionTable(WrapperMetalInterface& table) const {
@@ -2485,6 +2489,7 @@ Result DeviceVal::FillFunctionTable(WrapperMetalInterface& table) const {
     table.CreateBufferMetal = ::CreateBufferMetal;
     table.CreateTextureMetal = ::CreateTextureMetal;
     table.CreateFenceMetal = ::CreateFenceMetal;
+    table.GetRootSignatureMetal = ::GetRootSignatureMetal;
 
     return Result::SUCCESS;
 #else
