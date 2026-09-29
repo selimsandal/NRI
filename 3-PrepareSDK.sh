@@ -17,4 +17,13 @@ cp "${SELF}/LICENSE.txt" "${SDK}"
 cp "${SELF}/README.md" "${SDK}"
 cp "${SELF}/nri.natvis" "${SDK}"
 
-cp -H "${ROOT}/_Bin/libNRI.so" "${SDK}/Lib"
+if [ "$(uname -s)" = "Darwin" ]; then
+    cp -H "${ROOT}/_Bin/libNRI.dylib" "${SDK}/Lib"
+
+    if [ -f "${ROOT}/_Bin/libmetalirconverter.dylib" ]; then
+        cp -H "${ROOT}/_Bin/libmetalirconverter.dylib" "${SDK}/Lib"
+        echo "${SDK}: 'libmetalirconverter.dylib' is distributed under Apple's Metal Shader Converter license terms (see README.md)"
+    fi
+else
+    cp -H "${ROOT}/_Bin/libNRI.so" "${SDK}/Lib"
+fi

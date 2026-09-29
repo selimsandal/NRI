@@ -49,7 +49,9 @@ Result SwapChainMetal::Create(const SwapChainDesc& desc) {
     m_Layer->setWantsExtendedDynamicRangeContent(desc.format == SwapChainFormat::BT709_G10_16BIT || desc.format == SwapChainFormat::BT2020_G2084_10BIT);
     m_Layer->setFramebufferOnly(false);
     m_Layer->setDrawableSize(CGSizeMake(desc.width, desc.height));
+#if TARGET_OS_OSX
     m_Layer->setDisplaySyncEnabled(bool(desc.flags & SwapChainBits::VSYNC));
+#endif // iOS: always in sync with the display
 
     m_IsWaitable = bool(desc.flags & SwapChainBits::WAITABLE);
 
