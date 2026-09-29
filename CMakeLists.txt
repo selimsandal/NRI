@@ -1018,6 +1018,8 @@ file(WRITE "${OUT}" "unsigned char g_${NAME}_metallib[] = {${DATA}};\n")
         "Source/Metal/TextureMetal.hpp"
     )
 
+    target_include_directories(NRI_Shared PRIVATE "${metal_cpp_SOURCE_DIR}") # MetalFX in "UpscalerInterface.hpp"
+
     add_library(NRI_Metal STATIC)
     target_sources(NRI_Metal
         PRIVATE
@@ -1035,6 +1037,7 @@ file(WRITE "${OUT}" "unsigned char g_${NAME}_metallib[] = {${DATA}};\n")
             NRI_Shared
             "-framework Foundation"
             "-framework Metal"
+            "-framework MetalFX"
             "-framework QuartzCore"
             "-framework CoreGraphics"
             $<$<BOOL:${NRI_ENABLE_METAL_SHADER_CONVERTER}>:
