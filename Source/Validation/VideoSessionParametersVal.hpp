@@ -7,14 +7,19 @@ NRI_INLINE VideoSessionParametersVal::VideoSessionParametersVal(DeviceVal& devic
         for (uint32_t i = 0; i < desc.h264Parameters->pictureParameterSetNum; i++) {
             const VideoH264PictureParameterSetDesc& pictureParameterSet = desc.h264Parameters->pictureParameterSets[i];
             m_H264PpsToSpsPlusOne[pictureParameterSet.pictureParameterSetId] = (uint8_t)(pictureParameterSet.sequenceParameterSetId + 1);
+            m_ReferenceIndexDefaults[pictureParameterSet.pictureParameterSetId] = {pictureParameterSet.refIndexL0DefaultActiveMinus1, pictureParameterSet.refIndexL1DefaultActiveMinus1};
         }
     }
 
     if (desc.h265Parameters) {
+        m_HasH265Parameters = true;
+
         for (uint32_t i = 0; i < desc.h265Parameters->pictureParameterSetNum; i++) {
             const VideoH265PictureParameterSetDesc& pictureParameterSet = desc.h265Parameters->pictureParameterSets[i];
             m_H265PpsToSpsPlusOne[pictureParameterSet.pictureParameterSetId] = (uint8_t)(pictureParameterSet.sequenceParameterSetId + 1);
             m_H265PpsToVpsPlusOne[pictureParameterSet.pictureParameterSetId] = (uint8_t)(pictureParameterSet.videoParameterSetId + 1);
+            m_H265PpsListsModification[pictureParameterSet.pictureParameterSetId] = !!(pictureParameterSet.flags & VideoH265PictureParameterSetBits::LISTS_MODIFICATION_PRESENT);
+            m_ReferenceIndexDefaults[pictureParameterSet.pictureParameterSetId] = {pictureParameterSet.refIndexL0DefaultActiveMinus1, pictureParameterSet.refIndexL1DefaultActiveMinus1};
         }
     }
 }
@@ -34,9 +39,22 @@ NRI_INLINE bool VideoSessionParametersVal::IsH264ParameterSetValid(uint8_t seque
     return m_H264PpsToSpsPlusOne[pictureParameterSetId] == sequenceParameterSetId + 1;
 }
 
+NRI_INLINE bool VideoSessionParametersVal::HasH265Parameters() const {
+    return m_HasH265Parameters;
+}
+
+NRI_INLINE bool VideoSessionParametersVal::IsH265ListsModificationPresent(uint8_t pictureParameterSetId) const {
+    return pictureParameterSetId < 64 && m_H265PpsListsModification[pictureParameterSetId];
+}
+
 NRI_INLINE bool VideoSessionParametersVal::IsH265ParameterSetValid(uint8_t videoParameterSetId, uint8_t sequenceParameterSetId, uint8_t pictureParameterSetId) const {
     if (videoParameterSetId >= 16 || sequenceParameterSetId >= 16 || pictureParameterSetId >= 64)
         return false;
 
     return m_H265PpsToSpsPlusOne[pictureParameterSetId] == sequenceParameterSetId + 1 && m_H265PpsToVpsPlusOne[pictureParameterSetId] == videoParameterSetId + 1;
+}
+
+NRI_INLINE bool VideoSessionParametersVal::AreEncodeReferenceCountsValid(uint8_t pictureParameterSetId, uint32_t list0ReferenceNum, uint32_t list1ReferenceNum, bool isBFrame) const {
+    const std::array<uint8_t, 2>& defaults = m_ReferenceIndexDefaults[pictureParameterSetId];
+    return list0ReferenceNum == defaults[0] + 1u && (!isBFrame || list1ReferenceNum == defaults[1] + 1u);
 }

@@ -116,8 +116,11 @@ static Result NRI_CALL CreateCommandBuffer(CommandAllocator& commandAllocator, C
     return allocator.GetDevice().CreateImplementation<CommandBufferMetal>(commandBuffer, (const CommandAllocator&)allocator);
 }
 
-static Result NRI_CALL CreateFence(Device& device, uint64_t initialValue, Fence*& fence) {
-    return ((DeviceMetal&)device).CreateImplementation<FenceMetal>(fence, initialValue);
+static Result NRI_CALL CreateFence(Device& device, const FenceDesc& fenceDesc, Fence*& fence) {
+    if (fenceDesc.shared)
+        return Result::UNSUPPORTED;
+
+    return ((DeviceMetal&)device).CreateImplementation<FenceMetal>(fence, fenceDesc.initialValue);
 }
 
 static Result NRI_CALL CreateDescriptorPool(Device& device, const DescriptorPoolDesc& descriptorPoolDesc, DescriptorPool*& descriptorPool) {
@@ -598,6 +601,24 @@ static uint64_t NRI_CALL GetDescriptorNativeObject(const Descriptor* descriptor)
     return ((DescriptorMetal*)descriptor)->GetNativeObject();
 }
 
+static Result NRI_CALL GetBufferSharedHandle(const Buffer&, SharedHandle& sharedHandle) {
+    sharedHandle = {};
+
+    return Result::UNSUPPORTED;
+}
+
+static Result NRI_CALL GetTextureSharedHandle(const Texture&, SharedHandle& sharedHandle) {
+    sharedHandle = {};
+
+    return Result::UNSUPPORTED;
+}
+
+static Result NRI_CALL GetFenceSharedHandle(const Fence&, SharedHandle& sharedHandle) {
+    sharedHandle = {};
+
+    return Result::UNSUPPORTED;
+}
+
 Result DeviceMetal::FillFunctionTable(CoreInterface& table) const {
     table.GetDeviceDesc = ::GetDeviceDesc;
     table.GetBufferDesc = ::GetBufferDesc;
@@ -713,6 +734,10 @@ Result DeviceMetal::FillFunctionTable(CoreInterface& table) const {
     table.GetBufferNativeObject = ::GetBufferNativeObject;
     table.GetTextureNativeObject = ::GetTextureNativeObject;
     table.GetDescriptorNativeObject = ::GetDescriptorNativeObject;
+    table.GetBufferSharedHandle = ::GetBufferSharedHandle;
+    table.GetTextureSharedHandle = ::GetTextureSharedHandle;
+    table.GetFenceSharedHandle = ::GetFenceSharedHandle;
+    table.DestroySharedHandle = DestroySharedHandle;
 
     return Result::SUCCESS;
 }
@@ -1018,16 +1043,8 @@ Result DeviceMetal::FillFunctionTable(HelperInterface& table) const {
 
 static Result NRI_CALL CreateStreamer(Device& device, const StreamerDesc& streamerDesc, Streamer*& streamer) {
     DeviceMetal& deviceMetal = (DeviceMetal&)device;
-    StreamerImpl* impl = Allocate<StreamerImpl>(deviceMetal.GetAllocationCallbacks(), device, deviceMetal.GetCoreInterface());
-    Result result = impl->Create(streamerDesc);
 
-    if (result != Result::SUCCESS) {
-        Destroy(impl);
-        streamer = nullptr;
-    } else
-        streamer = (Streamer*)impl;
-
-    return result;
+    return CreateImplementation(deviceMetal.GetAllocationCallbacks(), streamer, Allocate<StreamerImpl>(deviceMetal.GetAllocationCallbacks(), device, deviceMetal.GetCoreInterface()), streamerDesc);
 }
 
 static void NRI_CALL DestroyStreamer(Streamer* streamer) {
@@ -1138,16 +1155,8 @@ Result DeviceMetal::FillFunctionTable(SwapChainInterface& table) const {
 
 static Result NRI_CALL CreateImgui(Device& device, const ImguiDesc& imguiDesc, Imgui*& imgui) {
     DeviceMetal& deviceMetal = (DeviceMetal&)device;
-    ImguiImpl* impl = Allocate<ImguiImpl>(deviceMetal.GetAllocationCallbacks(), device, deviceMetal.GetCoreInterface());
-    Result result = impl->Create(imguiDesc);
 
-    if (result != Result::SUCCESS) {
-        Destroy(impl);
-        imgui = nullptr;
-    } else
-        imgui = (Imgui*)impl;
-
-    return result;
+    return CreateImplementation(deviceMetal.GetAllocationCallbacks(), imgui, Allocate<ImguiImpl>(deviceMetal.GetAllocationCallbacks(), device, deviceMetal.GetCoreInterface()), imguiDesc);
 }
 
 static void NRI_CALL DestroyImgui(Imgui* imgui) {
@@ -1180,16 +1189,8 @@ Result DeviceMetal::FillFunctionTable(ImguiInterface& table) const {
 
 static Result NRI_CALL CreateUpscaler(Device& device, const UpscalerDesc& upscalerDesc, Upscaler*& upscaler) {
     DeviceMetal& deviceMetal = (DeviceMetal&)device;
-    UpscalerImpl* impl = Allocate<UpscalerImpl>(deviceMetal.GetAllocationCallbacks(), device, deviceMetal.GetCoreInterface());
-    Result result = impl->Create(upscalerDesc);
 
-    if (result != Result::SUCCESS) {
-        Destroy(impl);
-        upscaler = nullptr;
-    } else
-        upscaler = (Upscaler*)impl;
-
-    return result;
+    return CreateImplementation(deviceMetal.GetAllocationCallbacks(), upscaler, Allocate<UpscalerImpl>(deviceMetal.GetAllocationCallbacks(), device, deviceMetal.GetCoreInterface()), upscalerDesc);
 }
 
 static void NRI_CALL DestroyUpscaler(Upscaler* upscaler) {
@@ -1289,16 +1290,7 @@ bool GetAdapterDescMetal(AdapterDesc& adapterDesc, void* device) {
 }
 
 Result CreateDeviceMetal(const DeviceCreationDesc& desc, const DeviceCreationMetalDesc& descMetal, DeviceBase*& device) {
-    DeviceMetal* impl = Allocate<DeviceMetal>(desc.allocationCallbacks, desc.callbackInterface, desc.allocationCallbacks);
-    Result result = impl->Create(desc, descMetal);
-
-    if (result != Result::SUCCESS) {
-        Destroy(desc.allocationCallbacks, impl);
-        device = nullptr;
-    } else
-        device = (DeviceBase*)impl;
-
-    return result;
+    return CreateImplementation(desc.allocationCallbacks, device, Allocate<DeviceMetal>(desc.allocationCallbacks, desc.callbackInterface, desc.allocationCallbacks), desc, descMetal);
 }
 
 void nri::BeginNativeEncodingMetal(NS::Object* commandBuffer) {

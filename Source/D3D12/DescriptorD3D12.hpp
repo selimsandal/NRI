@@ -62,60 +62,46 @@ static inline uint32_t GetComponentMapping(const ComponentMapping& componentMapp
 Result DescriptorD3D12::Create(const TextureViewDesc& textureViewDesc) {
     const TextureD3D12& textureD3D12 = *(TextureD3D12*)textureViewDesc.texture;
     const TextureDesc& textureDesc = textureD3D12.GetDesc();
+    const TextureViewDesc textureViewDescFixed = FixTextureViewDesc(textureViewDesc, textureDesc);
 
-    DXGI_FORMAT format = GetDxgiFormat(textureViewDesc.format).typed;
-    Dim_t mipNum = textureViewDesc.mipNum == REMAINING ? (textureDesc.mipNum - textureViewDesc.mipOffset) : textureViewDesc.mipNum;
-    Dim_t layerNum = textureViewDesc.layerNum == REMAINING ? (textureDesc.layerNum - textureViewDesc.layerOffset) : textureViewDesc.layerNum;
-    Dim_t sliceNum = textureViewDesc.sliceNum == REMAINING ? (textureDesc.depth - textureViewDesc.sliceOffset) : textureViewDesc.sliceNum;
+    DXGI_FORMAT format = GetDxgiFormat(textureViewDescFixed.format).typed;
+    Dim_t mipNum = textureViewDescFixed.mipNum == REMAINING ? (textureDesc.mipNum - textureViewDescFixed.mipOffset) : textureViewDescFixed.mipNum;
+    Dim_t layerNum = textureViewDescFixed.layerNum == REMAINING ? (textureDesc.layerNum - textureViewDescFixed.layerOffset) : textureViewDescFixed.layerNum;
+    Dim_t sliceNum = textureViewDescFixed.sliceNum == REMAINING ? (textureDesc.depth - textureViewDescFixed.sliceOffset) : textureViewDescFixed.sliceNum;
 
     m_ViewDesc.texture = {};
-    m_ViewDesc.texture.layerOffset = textureViewDesc.layerOffset;
+    m_ViewDesc.texture.layerOffset = textureViewDescFixed.layerOffset;
     m_ViewDesc.texture.layerNum = layerNum;
-    m_ViewDesc.texture.mipOffset = textureViewDesc.mipOffset;
+    m_ViewDesc.texture.mipOffset = textureViewDescFixed.mipOffset;
     m_ViewDesc.texture.mipNum = mipNum;
+    m_ViewDesc.texture.layout = GetTextureViewLayout(textureViewDescFixed);
 
-    m_Format = textureViewDesc.format;
+    m_Format = textureViewDescFixed.format;
     m_Resource = textureD3D12;
 
     if (textureDesc.type == TextureType::TEXTURE_1D) {
-        switch (textureViewDesc.type) {
-            case TextureView::TEXTURE: {
-                D3D12_SHADER_RESOURCE_VIEW_DESC desc = {};
-                desc.Format = format;
-                desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1D;
-                desc.Shader4ComponentMapping = GetComponentMapping(textureViewDesc.components);
-                desc.Texture1D.MostDetailedMip = textureViewDesc.mipOffset;
-                desc.Texture1D.MipLevels = mipNum;
-
-                return CreateShaderResourceView(textureD3D12, desc);
-            }
+        switch (textureViewDescFixed.type) {
+            case TextureView::TEXTURE:
             case TextureView::TEXTURE_ARRAY: {
                 D3D12_SHADER_RESOURCE_VIEW_DESC desc = {};
                 desc.Format = format;
                 desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1DARRAY;
-                desc.Shader4ComponentMapping = GetComponentMapping(textureViewDesc.components);
-                desc.Texture1DArray.MostDetailedMip = textureViewDesc.mipOffset;
+                desc.Shader4ComponentMapping = GetComponentMapping(textureViewDescFixed.components);
+                desc.Texture1DArray.MostDetailedMip = textureViewDescFixed.mipOffset;
                 desc.Texture1DArray.MipLevels = mipNum;
-                desc.Texture1DArray.FirstArraySlice = textureViewDesc.layerOffset;
-                desc.Texture1DArray.ArraySize = layerNum;
+                desc.Texture1DArray.FirstArraySlice = textureViewDescFixed.layerOffset;
+                desc.Texture1DArray.ArraySize = textureViewDescFixed.type == TextureView::TEXTURE_ARRAY ? layerNum : 1;
 
                 return CreateShaderResourceView(textureD3D12, desc);
             }
-            case TextureView::STORAGE_TEXTURE: {
-                D3D12_UNORDERED_ACCESS_VIEW_DESC desc = {};
-                desc.Format = format;
-                desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE1D;
-                desc.Texture1D.MipSlice = textureViewDesc.mipOffset;
-
-                return CreateUnorderedAccessView(textureD3D12, desc);
-            }
+            case TextureView::STORAGE_TEXTURE:
             case TextureView::STORAGE_TEXTURE_ARRAY: {
                 D3D12_UNORDERED_ACCESS_VIEW_DESC desc = {};
                 desc.Format = format;
                 desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE1DARRAY;
-                desc.Texture1DArray.MipSlice = textureViewDesc.mipOffset;
-                desc.Texture1DArray.FirstArraySlice = textureViewDesc.layerOffset;
-                desc.Texture1DArray.ArraySize = layerNum;
+                desc.Texture1DArray.MipSlice = textureViewDescFixed.mipOffset;
+                desc.Texture1DArray.FirstArraySlice = textureViewDescFixed.layerOffset;
+                desc.Texture1DArray.ArraySize = textureViewDescFixed.type == TextureView::STORAGE_TEXTURE_ARRAY ? layerNum : 1;
 
                 return CreateUnorderedAccessView(textureD3D12, desc);
             }
@@ -123,8 +109,8 @@ Result DescriptorD3D12::Create(const TextureViewDesc& textureViewDesc) {
                 D3D12_RENDER_TARGET_VIEW_DESC desc = {};
                 desc.Format = format;
                 desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE1DARRAY;
-                desc.Texture1DArray.MipSlice = textureViewDesc.mipOffset;
-                desc.Texture1DArray.FirstArraySlice = textureViewDesc.layerOffset;
+                desc.Texture1DArray.MipSlice = textureViewDescFixed.mipOffset;
+                desc.Texture1DArray.FirstArraySlice = textureViewDescFixed.layerOffset;
                 desc.Texture1DArray.ArraySize = layerNum;
 
                 return CreateRenderTargetView(textureD3D12, desc);
@@ -133,12 +119,12 @@ Result DescriptorD3D12::Create(const TextureViewDesc& textureViewDesc) {
                 D3D12_DEPTH_STENCIL_VIEW_DESC desc = {};
                 desc.Format = format;
                 desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE1DARRAY;
-                desc.Texture1DArray.MipSlice = textureViewDesc.mipOffset;
-                desc.Texture1DArray.FirstArraySlice = textureViewDesc.layerOffset;
+                desc.Texture1DArray.MipSlice = textureViewDescFixed.mipOffset;
+                desc.Texture1DArray.FirstArraySlice = textureViewDescFixed.layerOffset;
                 desc.Texture1DArray.ArraySize = layerNum;
 
-                bool isDepthReadonly = textureViewDesc.planes != PlaneBits::ALL && (textureViewDesc.planes & PlaneBits::DEPTH) == 0;
-                bool isStencilReadonly = textureViewDesc.planes != PlaneBits::ALL && (textureViewDesc.planes & PlaneBits::STENCIL) == 0;
+                bool isDepthReadonly = GetFormatProps(textureViewDescFixed.format).isDepth && IsDepthReadOnly(GetTextureViewLayout(textureViewDescFixed));
+                bool isStencilReadonly = GetFormatProps(textureViewDescFixed.format).isStencil && IsStencilReadOnly(GetTextureViewLayout(textureViewDescFixed));
                 if (isDepthReadonly)
                     desc.Flags |= D3D12_DSV_FLAG_READ_ONLY_DEPTH;
                 if (isStencilReadonly)
@@ -151,81 +137,50 @@ Result DescriptorD3D12::Create(const TextureViewDesc& textureViewDesc) {
                 return Result::INVALID_ARGUMENT;
         }
     } else if (textureDesc.type == TextureType::TEXTURE_2D) {
-        switch (textureViewDesc.type) {
+        switch (textureViewDescFixed.type) {
             case TextureView::SUBPASS_INPUT:
-            case TextureView::TEXTURE: {
-                D3D12_SHADER_RESOURCE_VIEW_DESC desc = {};
-                desc.Format = GetPatchedShaderResourceViewFormat(format, textureViewDesc.planes);
-                desc.Shader4ComponentMapping = GetComponentMapping(textureViewDesc.components);
-                if (textureDesc.sampleNum > 1) {
-                    desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMS;
-                } else {
-                    desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-                    desc.Texture2D.MostDetailedMip = textureViewDesc.mipOffset;
-                    desc.Texture2D.MipLevels = mipNum;
-                    desc.Texture2D.PlaneSlice = GetPlaneIndex(textureViewDesc.planes);
-                }
-
-                return CreateShaderResourceView(textureD3D12, desc);
-            }
+            case TextureView::TEXTURE:
             case TextureView::TEXTURE_ARRAY: {
                 D3D12_SHADER_RESOURCE_VIEW_DESC desc = {};
-                desc.Format = GetPatchedShaderResourceViewFormat(format, textureViewDesc.planes);
-                desc.Shader4ComponentMapping = GetComponentMapping(textureViewDesc.components);
+                desc.Format = GetPatchedShaderResourceViewFormat(format, textureViewDescFixed.planes);
+                desc.Shader4ComponentMapping = GetComponentMapping(textureViewDescFixed.components);
                 if (textureDesc.sampleNum > 1) {
                     desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMSARRAY;
-                    desc.Texture2DMSArray.FirstArraySlice = textureViewDesc.layerOffset;
-                    desc.Texture2DMSArray.ArraySize = layerNum;
+                    desc.Texture2DMSArray.FirstArraySlice = textureViewDescFixed.layerOffset;
+                    desc.Texture2DMSArray.ArraySize = textureViewDescFixed.type == TextureView::TEXTURE_ARRAY ? layerNum : 1;
                 } else {
                     desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
-                    desc.Texture2DArray.MostDetailedMip = textureViewDesc.mipOffset;
+                    desc.Texture2DArray.MostDetailedMip = textureViewDescFixed.mipOffset;
                     desc.Texture2DArray.MipLevels = mipNum;
-                    desc.Texture2DArray.FirstArraySlice = textureViewDesc.layerOffset;
-                    desc.Texture2DArray.ArraySize = layerNum;
-                    desc.Texture2DArray.PlaneSlice = GetPlaneIndex(textureViewDesc.planes);
+                    desc.Texture2DArray.FirstArraySlice = textureViewDescFixed.layerOffset;
+                    desc.Texture2DArray.ArraySize = textureViewDescFixed.type == TextureView::TEXTURE_ARRAY ? layerNum : 1;
+                    desc.Texture2DArray.PlaneSlice = GetPlaneIndex(textureViewDescFixed.planes);
                 }
 
                 return CreateShaderResourceView(textureD3D12, desc);
             }
-            case TextureView::TEXTURE_CUBE: {
-                D3D12_SHADER_RESOURCE_VIEW_DESC desc = {};
-                desc.Format = GetPatchedShaderResourceViewFormat(format, textureViewDesc.planes);
-                desc.Shader4ComponentMapping = GetComponentMapping(textureViewDesc.components);
-                desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
-                desc.TextureCube.MostDetailedMip = textureViewDesc.mipOffset;
-                desc.TextureCube.MipLevels = mipNum;
-
-                return CreateShaderResourceView(textureD3D12, desc);
-            }
+            case TextureView::TEXTURE_CUBE:
             case TextureView::TEXTURE_CUBE_ARRAY: {
                 D3D12_SHADER_RESOURCE_VIEW_DESC desc = {};
-                desc.Format = GetPatchedShaderResourceViewFormat(format, textureViewDesc.planes);
-                desc.Shader4ComponentMapping = GetComponentMapping(textureViewDesc.components);
+                desc.Format = GetPatchedShaderResourceViewFormat(format, textureViewDescFixed.planes);
+                desc.Shader4ComponentMapping = GetComponentMapping(textureViewDescFixed.components);
                 desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
-                desc.TextureCubeArray.MostDetailedMip = textureViewDesc.mipOffset;
+                desc.TextureCubeArray.MostDetailedMip = textureViewDescFixed.mipOffset;
                 desc.TextureCubeArray.MipLevels = mipNum;
-                desc.TextureCubeArray.First2DArrayFace = textureViewDesc.layerOffset;
-                desc.TextureCubeArray.NumCubes = layerNum / 6;
+                desc.TextureCubeArray.First2DArrayFace = textureViewDescFixed.layerOffset;
+                desc.TextureCubeArray.NumCubes = textureViewDescFixed.type == TextureView::TEXTURE_CUBE_ARRAY ? layerNum / 6 : 1;
 
                 return CreateShaderResourceView(textureD3D12, desc);
             }
-            case TextureView::STORAGE_TEXTURE: {
-                D3D12_UNORDERED_ACCESS_VIEW_DESC desc = {};
-                desc.Format = format;
-                desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-                desc.Texture2D.MipSlice = textureViewDesc.mipOffset;
-                desc.Texture2D.PlaneSlice = GetPlaneIndex(textureViewDesc.planes);
-
-                return CreateUnorderedAccessView(textureD3D12, desc);
-            }
+            case TextureView::STORAGE_TEXTURE:
             case TextureView::STORAGE_TEXTURE_ARRAY: {
                 D3D12_UNORDERED_ACCESS_VIEW_DESC desc = {};
                 desc.Format = format;
                 desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
-                desc.Texture2DArray.MipSlice = textureViewDesc.mipOffset;
-                desc.Texture2DArray.FirstArraySlice = textureViewDesc.layerOffset;
-                desc.Texture2DArray.ArraySize = layerNum;
-                desc.Texture2DArray.PlaneSlice = GetPlaneIndex(textureViewDesc.planes);
+                desc.Texture2DArray.MipSlice = textureViewDescFixed.mipOffset;
+                desc.Texture2DArray.FirstArraySlice = textureViewDescFixed.layerOffset;
+                desc.Texture2DArray.ArraySize = textureViewDescFixed.type == TextureView::STORAGE_TEXTURE_ARRAY ? layerNum : 1;
+                desc.Texture2DArray.PlaneSlice = GetPlaneIndex(textureViewDescFixed.planes);
 
                 return CreateUnorderedAccessView(textureD3D12, desc);
             }
@@ -234,14 +189,14 @@ Result DescriptorD3D12::Create(const TextureViewDesc& textureViewDesc) {
                 desc.Format = format;
                 if (textureDesc.sampleNum > 1) {
                     desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DMSARRAY;
-                    desc.Texture2DMSArray.FirstArraySlice = textureViewDesc.layerOffset;
+                    desc.Texture2DMSArray.FirstArraySlice = textureViewDescFixed.layerOffset;
                     desc.Texture2DMSArray.ArraySize = layerNum;
                 } else {
                     desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
-                    desc.Texture2DArray.MipSlice = textureViewDesc.mipOffset;
-                    desc.Texture2DArray.FirstArraySlice = textureViewDesc.layerOffset;
+                    desc.Texture2DArray.MipSlice = textureViewDescFixed.mipOffset;
+                    desc.Texture2DArray.FirstArraySlice = textureViewDescFixed.layerOffset;
                     desc.Texture2DArray.ArraySize = layerNum;
-                    desc.Texture2DArray.PlaneSlice = GetPlaneIndex(textureViewDesc.planes);
+                    desc.Texture2DArray.PlaneSlice = GetPlaneIndex(textureViewDescFixed.planes);
                 }
 
                 return CreateRenderTargetView(textureD3D12, desc);
@@ -251,17 +206,17 @@ Result DescriptorD3D12::Create(const TextureViewDesc& textureViewDesc) {
                 desc.Format = format;
                 if (textureDesc.sampleNum > 1) {
                     desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY;
-                    desc.Texture2DMSArray.FirstArraySlice = textureViewDesc.layerOffset;
+                    desc.Texture2DMSArray.FirstArraySlice = textureViewDescFixed.layerOffset;
                     desc.Texture2DMSArray.ArraySize = layerNum;
                 } else {
                     desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
-                    desc.Texture2DArray.MipSlice = textureViewDesc.mipOffset;
-                    desc.Texture2DArray.FirstArraySlice = textureViewDesc.layerOffset;
+                    desc.Texture2DArray.MipSlice = textureViewDescFixed.mipOffset;
+                    desc.Texture2DArray.FirstArraySlice = textureViewDescFixed.layerOffset;
                     desc.Texture2DArray.ArraySize = layerNum;
                 }
 
-                bool isDepthReadonly = textureViewDesc.planes != PlaneBits::ALL && (textureViewDesc.planes & PlaneBits::DEPTH) == 0;
-                bool isStencilReadonly = textureViewDesc.planes != PlaneBits::ALL && (textureViewDesc.planes & PlaneBits::STENCIL) == 0;
+                bool isDepthReadonly = GetFormatProps(textureViewDescFixed.format).isDepth && IsDepthReadOnly(GetTextureViewLayout(textureViewDescFixed));
+                bool isStencilReadonly = GetFormatProps(textureViewDescFixed.format).isStencil && IsStencilReadOnly(GetTextureViewLayout(textureViewDescFixed));
                 if (isDepthReadonly)
                     desc.Flags |= D3D12_DSV_FLAG_READ_ONLY_DEPTH;
                 if (isStencilReadonly)
@@ -276,13 +231,13 @@ Result DescriptorD3D12::Create(const TextureViewDesc& textureViewDesc) {
                 return Result::INVALID_ARGUMENT;
         }
     } else {
-        switch (textureViewDesc.type) {
+        switch (textureViewDescFixed.type) {
             case TextureView::TEXTURE: {
                 D3D12_SHADER_RESOURCE_VIEW_DESC desc = {};
                 desc.Format = format;
                 desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
-                desc.Shader4ComponentMapping = GetComponentMapping(textureViewDesc.components);
-                desc.Texture3D.MostDetailedMip = textureViewDesc.mipOffset;
+                desc.Shader4ComponentMapping = GetComponentMapping(textureViewDescFixed.components);
+                desc.Texture3D.MostDetailedMip = textureViewDescFixed.mipOffset;
                 desc.Texture3D.MipLevels = mipNum;
 
                 return CreateShaderResourceView(textureD3D12, desc);
@@ -291,8 +246,8 @@ Result DescriptorD3D12::Create(const TextureViewDesc& textureViewDesc) {
                 D3D12_UNORDERED_ACCESS_VIEW_DESC desc = {};
                 desc.Format = format;
                 desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
-                desc.Texture3D.MipSlice = textureViewDesc.mipOffset;
-                desc.Texture3D.FirstWSlice = textureViewDesc.sliceOffset;
+                desc.Texture3D.MipSlice = textureViewDescFixed.mipOffset;
+                desc.Texture3D.FirstWSlice = textureViewDescFixed.sliceOffset;
                 desc.Texture3D.WSize = sliceNum;
 
                 return CreateUnorderedAccessView(textureD3D12, desc);
@@ -301,8 +256,8 @@ Result DescriptorD3D12::Create(const TextureViewDesc& textureViewDesc) {
                 D3D12_RENDER_TARGET_VIEW_DESC desc = {};
                 desc.Format = format;
                 desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE3D;
-                desc.Texture3D.MipSlice = textureViewDesc.mipOffset;
-                desc.Texture3D.FirstWSlice = textureViewDesc.sliceOffset;
+                desc.Texture3D.MipSlice = textureViewDescFixed.mipOffset;
+                desc.Texture3D.FirstWSlice = textureViewDescFixed.sliceOffset;
                 desc.Texture3D.WSize = sliceNum;
 
                 return CreateRenderTargetView(textureD3D12, desc);

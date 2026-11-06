@@ -2,12 +2,6 @@
 
 #pragma once
 
-#if NRI_ENABLE_AGILITY_SDK_SUPPORT
-typedef ID3D12Resource2 ID3D12ResourceBest;
-#else
-typedef ID3D12Resource ID3D12ResourceBest;
-#endif
-
 namespace nri {
 
 struct BufferD3D12 final : public DebugNameBase {
@@ -34,10 +28,15 @@ struct BufferD3D12 final : public DebugNameBase {
         return m_Device;
     }
 
+    inline bool IsMapped() const {
+        return m_MappedMemory != nullptr;
+    }
+
     Result Create(const BufferDesc& bufferDesc);
     Result Create(const BufferD3D12Desc& bufferD3D12Desc);
     Result Allocate(MemoryLocation memoryLocation, float priority, bool committed);
     Result BindMemory(const MemoryD3D12& memory, uint64_t offset);
+    Result GetSharedHandle(SharedHandle& sharedHandle) const;
 
     //================================================================================================================
     // DebugNameBase

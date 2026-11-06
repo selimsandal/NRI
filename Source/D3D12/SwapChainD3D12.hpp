@@ -146,8 +146,8 @@ Result SwapChainD3D12::Create(const SwapChainDesc& swapChainDesc) {
         TextureD3D12Desc textureDesc = {};
         textureDesc.d3d12Resource = textureNative;
 
-        TextureD3D12* texture = Allocate<TextureD3D12>(m_Device.GetAllocationCallbacks(), m_Device);
-        const Result res = texture->Create(textureDesc);
+        TextureD3D12* texture = nullptr;
+        const Result res = m_Device.CreateImplementation<TextureD3D12>(texture, textureDesc);
         if (res != Result::SUCCESS)
             return res;
 
@@ -163,6 +163,7 @@ Result SwapChainD3D12::Create(const SwapChainDesc& swapChainDesc) {
         m_Flags &= ~SwapChainBits::ALLOW_TEARING;
     if (!m_FrameLatencyWaitableObject)
         m_Flags &= ~SwapChainBits::WAITABLE;
+    m_Flags &= ~SwapChainBits::LATEST_READY; // DXGI has no such mode
 
     return Result::SUCCESS;
 }

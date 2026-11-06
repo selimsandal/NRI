@@ -38,8 +38,8 @@ Implicit:
 
 #pragma once
 
-#define NRI_VERSION 190
-#define NRI_VERSION_DATE "9 October 2026"
+#define NRI_VERSION 191
+#define NRI_VERSION_DATE "28 October 2026"
 
 // C/C++ compatible interface (auto-selection or via "NRI_FORCE_C" macro)
 #include "NRIDescs.h"
@@ -69,17 +69,18 @@ NriStruct(CoreInterface) {
     const NriRef(TextureDesc)   (NRI_CALL *GetTextureDesc)          (const NriRef(Texture) texture);
     Nri(FormatSupportBits)      (NRI_CALL *GetFormatSupport)        (const NriRef(Device) device, Nri(Format) format);
 
-    // Returns one of the pre-created queues (see "DeviceCreationDesc" or wrapper extensions)
-    // Return codes: "UNSUPPORTED" (no queues of "queueType") or "INVALID_ARGUMENT" (if "queueIndex" is out of bounds).
-    // Getting "COMPUTE" and/or "COPY" queues switches VK sharing mode to "VK_SHARING_MODE_CONCURRENT" for resources created without "queueExclusive" flag.
-    // This approach is used to minimize number of "queue ownership transfers", but also adds a requirement to "get" all async queues BEFORE creation of
-    // resources participating into multi-queue activities. Explicit use of "queueExclusive" removes any restrictions.
+    // Returns a pre-created queue (see "DeviceCreationDesc" or wrapper extensions).
+    // "UNSUPPORTED" if no queues of "queueType"; "INVALID_ARGUMENT" if "queueIndex" is out of range.
+    // VK: with only one queue type obtained (e.g. "GRAPHICS"), NRI can use "EXCLUSIVE" sharing internally: no local ownership transfers are needed.
+    // Additional queues (e.g. "COMPUTE" or "COPY") enable "CONCURRENT" sharing for new resources where needed.
+    // Get all participating queues before resource creation; explicit "SharingMode::EXCLUSIVE" textures are exempt.
+    // Buffers follow D3D12: ownership transfers are only needed to or from an external user
     Nri(Result)         (NRI_CALL *GetQueue)                        (NriRef(Device) device, Nri(QueueType) queueType, uint32_t queueIndex, NriOut NriRef(Queue*) queue);
 
     // Create (doesn't assume allocation of big chunks of memory on the device, but it happens for some entities implicitly)
     Nri(Result)         (NRI_CALL *CreateCommandAllocator)          (NriRef(Queue) queue, NriOut NriRef(CommandAllocator*) commandAllocator);
     Nri(Result)         (NRI_CALL *CreateCommandBuffer)             (NriRef(CommandAllocator) commandAllocator, NriOut NriRef(CommandBuffer*) commandBuffer);
-    Nri(Result)         (NRI_CALL *CreateFence)                     (NriRef(Device) device, uint64_t initialValue, NriOut NriRef(Fence*) fence);
+    Nri(Result)         (NRI_CALL *CreateFence)                     (NriRef(Device) device, const NriRef(FenceDesc) fenceDesc, NriOut NriRef(Fence*) fence);
     Nri(Result)         (NRI_CALL *CreateDescriptorPool)            (NriRef(Device) device, const NriRef(DescriptorPoolDesc) descriptorPoolDesc, NriOut NriRef(DescriptorPool*) descriptorPool);
     Nri(Result)         (NRI_CALL *CreatePipelineLayout)            (NriRef(Device) device, const NriRef(PipelineLayoutDesc) pipelineLayoutDesc, NriOut NriRef(PipelineLayout*) pipelineLayout);
     Nri(Result)         (NRI_CALL *CreateGraphicsPipeline)          (NriRef(Device) device, const NriRef(GraphicsPipelineDesc) graphicsPipelineDesc, NriOut NriRef(Pipeline*) pipeline);
@@ -208,7 +209,7 @@ NriStruct(CoreInterface) {
         void                (NRI_CALL *CmdCopyTexture)              (NriRef(CommandBuffer) commandBuffer, NriRef(Texture) dstTexture, NriOptional const NriPtr(TextureRegionDesc) dstRegion, const NriRef(Texture) srcTexture, NriOptional const NriPtr(TextureRegionDesc) srcRegion); // METAL: a single-plane depth-stencil copy requires identical non-multisampled formats
         void                (NRI_CALL *CmdUploadBufferToTexture)    (NriRef(CommandBuffer) commandBuffer, NriRef(Texture) dstTexture, const NriRef(TextureRegionDesc) dstRegion, const NriRef(Buffer) srcBuffer, const NriRef(TextureDataLayoutDesc) srcDataLayout);
         void                (NRI_CALL *CmdReadbackTextureToBuffer)  (NriRef(CommandBuffer) commandBuffer, NriRef(Buffer) dstBuffer, const NriRef(TextureDataLayoutDesc) dstDataLayout, const NriRef(Texture) srcTexture, const NriRef(TextureRegionDesc) srcRegion);
-        void                (NRI_CALL *CmdZeroBuffer)               (NriRef(CommandBuffer) commandBuffer, NriRef(Buffer) buffer, uint64_t offset, uint64_t size);
+        void                (NRI_CALL *CmdZeroBuffer)               (NriRef(CommandBuffer) commandBuffer, NriRef(Buffer) buffer, uint64_t offset, uint64_t size); // offset and size must be multiples of 4
 
         // Resolve (outside of rendering). METAL: color only, use "RenderingDesc::depth.resolveDst" for depth
         void                (NRI_CALL *CmdResolveTexture)           (NriRef(CommandBuffer) commandBuffer, NriRef(Texture) dstTexture, NriOptional const NriPtr(TextureRegionDesc) dstRegion, const NriRef(Texture) srcTexture, NriOptional const NriPtr(TextureRegionDesc) srcRegion, Nri(ResolveOp) resolveOp); // "features.regionResolve" is needed for region specification
@@ -282,6 +283,12 @@ NriStruct(CoreInterface) {
     uint64_t            (NRI_CALL *GetBufferNativeObject)           (const NriPtr(Buffer) buffer);               // ID3D11Buffer*                   | ID3D12Resource*             | VkBuffer                           | WGPUBuffer
     uint64_t            (NRI_CALL *GetTextureNativeObject)          (const NriPtr(Texture) texture);             // ID3D11Resource*                 | ID3D12Resource*             | VkImage                            | WGPUTexture
     uint64_t            (NRI_CALL *GetDescriptorNativeObject)       (const NriPtr(Descriptor) descriptor);       // ID3D11View/ID3D11SamplerState*  | D3D12_CPU_DESCRIPTOR_HANDLE | VkImageView/VkBufferView/VkSampler | WGPUTextureView/WGPUBuffer/WGPUSampler
+
+    // Shared handles: each successful call returns a new caller-owned handle (see "SharedHandle")
+    Nri(Result)         (NRI_CALL *GetBufferSharedHandle)           (const NriRef(Buffer) buffer, NriOut NriRef(SharedHandle) sharedHandle);
+    Nri(Result)         (NRI_CALL *GetTextureSharedHandle)          (const NriRef(Texture) texture, NriOut NriRef(SharedHandle) sharedHandle);
+    Nri(Result)         (NRI_CALL *GetFenceSharedHandle)            (const NriRef(Fence) fence, NriOut NriRef(SharedHandle) sharedHandle);
+    void                (NRI_CALL *DestroySharedHandle)            (NriRef(SharedHandle) sharedHandle); // closes the caller-owned handle and clears the struct
 };
 
 NriNamespaceEnd

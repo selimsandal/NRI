@@ -1,16 +1,6 @@
 // © 2026 NVIDIA Corporation
 
-SwapChainWGPU::~SwapChainWGPU() {
-    for (TextureWGPU* texture : m_Textures)
-        Destroy(m_Device.GetAllocationCallbacks(), texture);
-
-    if (m_Surface) {
-        wgpuSurfaceUnconfigure(m_Surface);
-        wgpuSurfaceRelease(m_Surface);
-    }
-}
-
-WGPUTextureFormat SwapChainWGPU::GetFormat(const WGPUSurfaceCapabilities& capabilities, SwapChainFormat format) const {
+static inline WGPUTextureFormat GetSurfaceFormat(const WGPUSurfaceCapabilities& capabilities, SwapChainFormat format) {
     WGPUTextureFormat requested = GetSwapChainTextureFormat(format);
 
     for (size_t i = 0; i < capabilities.formatCount; i++) {
@@ -18,10 +8,17 @@ WGPUTextureFormat SwapChainWGPU::GetFormat(const WGPUSurfaceCapabilities& capabi
             return requested;
     }
 
+    if (format == SwapChainFormat::BT709_G22_8BIT) {
+        for (size_t i = 0; i < capabilities.formatCount; i++) {
+            if (capabilities.formats[i] == WGPUTextureFormat_BGRA8Unorm)
+                return WGPUTextureFormat_BGRA8Unorm;
+        }
+    }
+
     return capabilities.formatCount ? capabilities.formats[0] : requested;
 }
 
-WGPUPresentMode SwapChainWGPU::GetPresentMode(const WGPUSurfaceCapabilities& capabilities, SwapChainBits flags) const {
+static inline WGPUPresentMode GetSurfacePresentMode(const WGPUSurfaceCapabilities& capabilities, SwapChainBits flags) {
     WGPUPresentMode requested = (flags & SwapChainBits::VSYNC) ? WGPUPresentMode_Fifo : WGPUPresentMode_Immediate;
 
     for (size_t i = 0; i < capabilities.presentModeCount; i++) {
@@ -39,13 +36,23 @@ WGPUPresentMode SwapChainWGPU::GetPresentMode(const WGPUSurfaceCapabilities& cap
     return WGPUPresentMode_Fifo;
 }
 
-WGPUCompositeAlphaMode SwapChainWGPU::GetAlphaMode(const WGPUSurfaceCapabilities& capabilities) const {
+static inline WGPUCompositeAlphaMode GetSurfaceAlphaMode(const WGPUSurfaceCapabilities& capabilities) {
     for (size_t i = 0; i < capabilities.alphaModeCount; i++) {
         if (capabilities.alphaModes[i] == WGPUCompositeAlphaMode_Opaque)
             return WGPUCompositeAlphaMode_Opaque;
     }
 
     return WGPUCompositeAlphaMode_Auto;
+}
+
+SwapChainWGPU::~SwapChainWGPU() {
+    for (TextureWGPU* texture : m_Textures)
+        Destroy(m_Device.GetAllocationCallbacks(), texture);
+
+    if (m_Surface) {
+        wgpuSurfaceUnconfigure(m_Surface);
+        wgpuSurfaceRelease(m_Surface);
+    }
 }
 
 Result SwapChainWGPU::Create(const SwapChainDesc& swapChainDesc) {
@@ -98,9 +105,16 @@ Result SwapChainWGPU::Create(const SwapChainDesc& swapChainDesc) {
     if (status != WGPUStatus_Success)
         return Result::FAILURE;
 
-    WGPUTextureFormat format = GetFormat(capabilities, swapChainDesc.format);
-    WGPUPresentMode presentMode = GetPresentMode(capabilities, swapChainDesc.flags);
-    WGPUCompositeAlphaMode alphaMode = GetAlphaMode(capabilities);
+    WGPUTextureFormat format = GetSurfaceFormat(capabilities, swapChainDesc.format);
+    WGPUPresentMode presentMode = GetSurfacePresentMode(capabilities, swapChainDesc.flags);
+    WGPUCompositeAlphaMode alphaMode = GetSurfaceAlphaMode(capabilities);
+
+    WGPUTextureUsage usage = (WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopySrc | WGPUTextureUsage_CopyDst) & capabilities.usages;
+
+    // TODO: remove WAR when wgpu-native fixes "to_native_texture_usage_flags", which reports COPY_DST as CopySrc.
+    // https://github.com/gfx-rs/wgpu-native/blob/v29.0.1.1/src/conv.rs#L1759-L1766
+    if (wgpuGetVersion() == 0x1D000101 && (capabilities.usages & WGPUTextureUsage_CopySrc)) // v29.0.1.1
+        usage |= WGPUTextureUsage_CopyDst;
 
     wgpuSurfaceCapabilitiesFreeMembers(capabilities);
 
@@ -108,7 +122,7 @@ Result SwapChainWGPU::Create(const SwapChainDesc& swapChainDesc) {
     WGPUSurfaceConfiguration desc = WGPU_SURFACE_CONFIGURATION_INIT;
     desc.device = m_Device;
     desc.format = format;
-    desc.usage = WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopySrc | WGPUTextureUsage_CopyDst;
+    desc.usage = usage;
     desc.width = swapChainDesc.width;
     desc.height = swapChainDesc.height;
     desc.alphaMode = alphaMode;
@@ -151,10 +165,10 @@ Result SwapChainWGPU::AcquireNextTexture(uint32_t& textureIndex) {
     WGPUSurfaceTexture surfaceTexture = WGPU_SURFACE_TEXTURE_INIT;
     wgpuSurfaceGetCurrentTexture(m_Surface, &surfaceTexture);
 
-    if (surfaceTexture.status == WGPUSurfaceGetCurrentTextureStatus_Outdated)
+    if ((uint32_t)surfaceTexture.status == (uint32_t)WGPUSurfaceGetCurrentTextureStatus_Occluded || surfaceTexture.status == WGPUSurfaceGetCurrentTextureStatus_Timeout)
+        return Result::NOT_READY;
+    if (surfaceTexture.status == WGPUSurfaceGetCurrentTextureStatus_Outdated || surfaceTexture.status == WGPUSurfaceGetCurrentTextureStatus_Lost)
         return Result::OUT_OF_DATE;
-    if (surfaceTexture.status == WGPUSurfaceGetCurrentTextureStatus_Lost)
-        return Result::DEVICE_LOST;
     if (surfaceTexture.status != WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal && surfaceTexture.status != WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal)
         return Result::FAILURE;
 

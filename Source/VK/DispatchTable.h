@@ -20,6 +20,8 @@ struct DispatchTable {
     VK_FUNC(GetDeviceGroupPeerMemoryFeatures);
     VK_FUNC(GetPhysicalDeviceFormatProperties2);
     VK_FUNC(GetPhysicalDeviceImageFormatProperties2);
+    VK_FUNC(GetPhysicalDeviceExternalBufferProperties);
+    VK_FUNC(GetPhysicalDeviceExternalSemaphoreProperties);
     VK_FUNC(CreateDevice); // may return "VK_ERROR_DEVICE_LOST"
     VK_FUNC(GetDeviceQueue2);
     VK_FUNC(EnumeratePhysicalDeviceGroups);
@@ -208,6 +210,14 @@ struct DispatchTable {
 #ifdef VK_USE_PLATFORM_WIN32_KHR
                                                           // VK_KHR_external_memory_win32
     VK_FUNC(GetMemoryWin32HandlePropertiesKHR);           // + | +
+    VK_FUNC(GetMemoryWin32HandleKHR);                     // + | +
+                                                          // VK_KHR_external_semaphore_win32
+    VK_FUNC(GetSemaphoreWin32HandleKHR);                  // + | +
+#else
+                                                          // VK_KHR_external_memory_fd
+    VK_FUNC(GetMemoryFdKHR);                              // + | +
+                                                          // VK_KHR_external_semaphore_fd
+    VK_FUNC(GetSemaphoreFdKHR);                           // + | +
 #endif
                                                           // VK_KHR_acceleration_structure
     VK_FUNC(CreateAccelerationStructureKHR);              // + | +

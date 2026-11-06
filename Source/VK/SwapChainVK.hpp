@@ -230,8 +230,13 @@ Result SwapChainVK::Create(const SwapChainDesc& swapChainDesc) {
         VkResult vkResult = vk.GetPhysicalDeviceSurfacePresentModesKHR(m_Device, m_Surface, &surfacePresentModeNum, surfacePresentModes.data());
         NRI_RETURN_ON_BAD_VKRESULT(&m_Device, vkResult, "vkGetPhysicalDeviceSurfacePresentModesKHR");
 
+        // "LATEST_READY" with "VSYNC": queued like "FIFO", but the newest ready image is taken at vblank
+        bool latestReady = (swapChainDesc.flags & SwapChainBits::LATEST_READY) && m_Device.m_IsSupported.fifoLatestReady;
+        VkPresentModeKHR cappedMode = (swapChainDesc.flags & SwapChainBits::ALLOW_TEARING) ? VK_PRESENT_MODE_FIFO_RELAXED_KHR : VK_PRESENT_MODE_FIFO_KHR;
+
         const VkPresentModeKHR cappedModes[] = {
-            (swapChainDesc.flags & SwapChainBits::ALLOW_TEARING) ? VK_PRESENT_MODE_FIFO_RELAXED_KHR : VK_PRESENT_MODE_FIFO_KHR,
+            latestReady ? VK_PRESENT_MODE_FIFO_LATEST_READY_EXT : cappedMode,
+            cappedMode,
             VK_PRESENT_MODE_FIFO_KHR, // guaranteed to be supported
         };
 
@@ -268,6 +273,7 @@ Result SwapChainVK::Create(const SwapChainDesc& swapChainDesc) {
     }
 
     // Scaling mode and caps
+    VkExtent2D swapChainExtent = {};
     bool isScalingSupported = false;
     uint32_t textureNum = swapChainDesc.textureNum;
     VkSurfaceTransformFlagBitsKHR preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
@@ -295,15 +301,26 @@ Result SwapChainVK::Create(const SwapChainDesc& swapChainDesc) {
         VkResult vkResult = vk.GetPhysicalDeviceSurfaceCapabilities2KHR(m_Device, &surfaceInfo, &surfaceCaps2);
         NRI_RETURN_ON_BAD_VKRESULT(&m_Device, vkResult, "vkGetPhysicalDeviceSurfaceCapabilities2KHR");
 
+        // TODO: that's the minimal check to detect scaling support
+        if (surfacePresentScalingCaps.supportedPresentScaling != 0 && surfacePresentScalingCaps.supportedPresentGravityX != 0 && surfacePresentScalingCaps.supportedPresentGravityY != 0)
+            isScalingSupported = true;
+
         // Caps
         const VkSurfaceCapabilitiesKHR& surfaceCaps = surfaceCaps2.surfaceCapabilities;
-        bool isWidthValid = swapChainDesc.width >= surfaceCaps.minImageExtent.width && swapChainDesc.width <= surfaceCaps.maxImageExtent.width;
-        NRI_RETURN_ON_FAILURE(&m_Device, isWidthValid, Result::INVALID_ARGUMENT, "swapChainDesc.width is out of [%u, %u] range", surfaceCaps.minImageExtent.width,
-            surfaceCaps.maxImageExtent.width);
+        VkExtent2D desiredExtent = { swapChainDesc.width, swapChainDesc.height };
+        if (isScalingSupported) {
+            swapChainExtent.width = std::max(surfacePresentScalingCaps.minScaledImageExtent.width, std::min(surfacePresentScalingCaps.maxScaledImageExtent.width, desiredExtent.width));
+            swapChainExtent.height = std::max(surfacePresentScalingCaps.minScaledImageExtent.height, std::min(surfacePresentScalingCaps.maxScaledImageExtent.height, desiredExtent.height));
+        } else if (surfaceCaps.currentExtent.width != UINT32_MAX) {
+            swapChainExtent = surfaceCaps.currentExtent;
+        } else {
+            swapChainExtent.width = std::max(surfaceCaps.minImageExtent.width, std::min(surfaceCaps.maxImageExtent.width, desiredExtent.width));
+            swapChainExtent.height = std::max(surfaceCaps.minImageExtent.height, std::min(surfaceCaps.maxImageExtent.height, desiredExtent.height));
+        }
 
-        bool isHeightValid = swapChainDesc.height >= surfaceCaps.minImageExtent.height && swapChainDesc.height <= surfaceCaps.maxImageExtent.height;
-        NRI_RETURN_ON_FAILURE(&m_Device, isHeightValid, Result::INVALID_ARGUMENT, "swapChainDesc.height is out of [%u, %u] range", surfaceCaps.minImageExtent.height,
-            surfaceCaps.maxImageExtent.height);
+        // A minimized surface may have no drawable extent
+        if (swapChainExtent.width == 0 || swapChainExtent.height == 0)
+            return Result::NOT_READY;
 
         // Silently clamp "textureNum" to the supported range
         if (textureNum < surfaceCaps.minImageCount)
@@ -328,10 +345,6 @@ Result SwapChainVK::Create(const SwapChainDesc& swapChainDesc) {
 
         // VK guarantees only COLOR_ATTACHMENT usage for swap chain images; transfer usages are optional
         swapchainImageUsageFlags |= surfaceCaps.supportedUsageFlags & (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-
-        // TODO: that's the minimal check to detect scaling support
-        if (surfacePresentScalingCaps.supportedPresentScaling != 0 && surfacePresentScalingCaps.supportedPresentGravityX != 0 && surfacePresentScalingCaps.supportedPresentGravityY != 0)
-            isScalingSupported = true;
     }
 
     { // Swap chain
@@ -341,7 +354,7 @@ Result SwapChainVK::Create(const SwapChainDesc& swapChainDesc) {
         swapchainInfo.minImageCount = textureNum;
         swapchainInfo.imageFormat = surfaceFormat.surfaceFormat.format;
         swapchainInfo.imageColorSpace = surfaceFormat.surfaceFormat.colorSpace;
-        swapchainInfo.imageExtent = {swapChainDesc.width, swapChainDesc.height};
+        swapchainInfo.imageExtent = {swapChainExtent.width, swapChainExtent.height};
         swapchainInfo.imageArrayLayers = 1;
         swapchainInfo.imageUsage = swapchainImageUsageFlags;
         swapchainInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -416,24 +429,25 @@ Result SwapChainVK::Create(const SwapChainDesc& swapChainDesc) {
             desc.vkFormat = surfaceFormat.surfaceFormat.format;
             desc.vkImageType = VK_IMAGE_TYPE_2D;
             desc.vkImageUsageFlags = swapchainImageUsageFlags;
-            desc.width = swapChainDesc.width;
-            desc.height = swapChainDesc.height;
+            desc.width = (Dim_t)swapChainExtent.width;
+            desc.height = (Dim_t)swapChainExtent.height;
             desc.depth = 1;
             desc.mipNum = 1;
             desc.layerNum = 1;
             desc.sampleNum = 1;
 
-            TextureVK* texture = Allocate<TextureVK>(m_Device.GetAllocationCallbacks(), m_Device);
-            texture->Create(desc);
-
-            m_Textures[i] = texture;
+            Result result = m_Device.CreateImplementation<TextureVK>(m_Textures[i], desc);
+            if (result != Result::SUCCESS)
+                return result;
         }
     }
 
     // Latency fence
     if (allowLowLatency) {
-        m_LatencyFence = Allocate<FenceVK>(m_Device.GetAllocationCallbacks(), m_Device);
-        m_LatencyFence->Create(0);
+        FenceDesc fenceDesc = {};
+        Result result = m_Device.CreateImplementation<FenceVK>(m_LatencyFence, fenceDesc);
+        if (result != Result::SUCCESS)
+            return result;
     }
 
     // Finalize
@@ -443,6 +457,9 @@ Result SwapChainVK::Create(const SwapChainDesc& swapChainDesc) {
         m_Flags &= ~SwapChainBits::ALLOW_LOW_LATENCY;
     if (!m_Device.GetDesc().features.waitableSwapChain)
         m_Flags &= ~SwapChainBits::WAITABLE;
+
+    if (presentMode != VK_PRESENT_MODE_FIFO_LATEST_READY_EXT)
+        m_Flags &= ~SwapChainBits::LATEST_READY;
 
     return Result::SUCCESS;
 }
@@ -470,6 +487,9 @@ NRI_INLINE Result SwapChainVK::AcquireNextTexture(FenceVK& acquireSemaphore, uin
 
     const auto& vk = m_Device.GetDispatchTable();
     VkResult vkResult = vk.AcquireNextImage2KHR(m_Device, &acquireInfo, &m_TextureIndex);
+    if (vkResult == VK_ERROR_OUT_OF_DATE_KHR)
+        return Result::OUT_OF_DATE;
+
     NRI_RETURN_ON_BAD_VKRESULT(&m_Device, vkResult, "AcquireNextImage2KHR");
 
     textureIndex = m_TextureIndex;
@@ -483,6 +503,9 @@ NRI_INLINE Result SwapChainVK::WaitForPresent(uint64_t presentId) {
 
     const auto& vk = m_Device.GetDispatchTable();
     VkResult vkResult = vk.WaitForPresentKHR(m_Device, m_Handle, presentId, MsToUs(NRI_TIMEOUT_PRESENT));
+    if (vkResult == VK_ERROR_OUT_OF_DATE_KHR)
+        return Result::OUT_OF_DATE;
+
     NRI_RETURN_ON_BAD_VKRESULT(&m_Device, vkResult, "WaitForPresentKHR");
 
     return Result::SUCCESS;
@@ -516,6 +539,9 @@ NRI_INLINE Result SwapChainVK::Present(FenceVK& releaseSemaphore, uint64_t prese
 
     if ((m_Flags & SwapChainBits::ALLOW_LOW_LATENCY) && presentIdValue != 0)
         SetLatencyMarker(presentIdValue, (LatencyMarker)VK_LATENCY_MARKER_PRESENT_END_NV);
+
+    if (vkResult == VK_ERROR_OUT_OF_DATE_KHR)
+        return Result::OUT_OF_DATE;
 
     NRI_RETURN_ON_BAD_VKRESULT(&m_Device, vkResult, "QueuePresentKHR");
 

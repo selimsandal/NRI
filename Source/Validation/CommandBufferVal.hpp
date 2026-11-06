@@ -24,7 +24,7 @@ static inline bool IsAccessMaskSupported(const BufferDesc& bufferDesc, AccessBit
         isSupported = isSupported && (bufferDesc.usage & (BufferUsageBits::SHADER_RESOURCE | BufferUsageBits::ACCELERATION_STRUCTURE_BUILD_INPUT)) != 0;
     if (accessMask & AccessBits::SHADER_RESOURCE_STORAGE)
         isSupported = isSupported && (bufferDesc.usage & BufferUsageBits::SHADER_RESOURCE_STORAGE) != 0;
-    if (accessMask & (AccessBits::RESOLVE_SOURCE | AccessBits::RESOLVE_DESTINATION))
+    if (accessMask & (AccessBits::RESOLVE_SOURCE | AccessBits::RESOLVE_DESTINATION | AccessBits::RESOLVE_ATTACHMENT_SOURCE | AccessBits::RESOLVE_ATTACHMENT_DESTINATION))
         isSupported = false;
     if (accessMask & (AccessBits::HOST_READ | AccessBits::HOST_WRITE))
         isSupported = false;
@@ -48,6 +48,12 @@ static inline bool IsAccessMaskSupported(const TextureDesc& textureDesc, AccessB
         isSupported = isSupported && (textureDesc.usage & TextureUsageBits::SHADING_RATE_ATTACHMENT) != 0;
     if (accessMask & AccessBits::DEPTH_STENCIL_ATTACHMENT)
         isSupported = isSupported && (textureDesc.usage & TextureUsageBits::DEPTH_STENCIL_ATTACHMENT) != 0;
+    if (accessMask & (AccessBits::RESOLVE_ATTACHMENT_SOURCE | AccessBits::RESOLVE_ATTACHMENT_DESTINATION))
+        isSupported = isSupported && (textureDesc.usage & (TextureUsageBits::COLOR_ATTACHMENT | TextureUsageBits::DEPTH_STENCIL_ATTACHMENT)) != 0;
+    if (accessMask & AccessBits::RESOLVE_ATTACHMENT_SOURCE)
+        isSupported = isSupported && textureDesc.sampleNum > 1;
+    if (accessMask & AccessBits::RESOLVE_ATTACHMENT_DESTINATION)
+        isSupported = isSupported && textureDesc.sampleNum == 1;
     if (accessMask & AccessBits::ACCELERATION_STRUCTURE)
         isSupported = false;
     if (accessMask & AccessBits::MICROMAP)
@@ -102,7 +108,11 @@ static inline bool IsTextureLayoutSupported(const TextureDesc& textureDesc, Layo
     return true;
 }
 
-static inline bool IsDrawParametersEmulationEnabled(const PipelineLayoutDesc& pipelineLayoutDesc) {
+static inline bool IsDrawParametersEmulationEnabled(GraphicsAPI graphicsAPI, const PipelineLayoutDesc& pipelineLayoutDesc) {
+    // Emulation exists only in D3D12 and METAL, other backends use native draw parameters and their indirect records stay "Draw(Indexed)Desc"
+    if (graphicsAPI != GraphicsAPI::D3D12 && graphicsAPI != GraphicsAPI::METAL)
+        return false;
+
     return (pipelineLayoutDesc.flags & PipelineLayoutBits::ENABLE_DRAW_PARAMETERS_EMULATION) != 0 && (pipelineLayoutDesc.shaderStages & StageBits::VERTEX_SHADER) != 0;
 }
 
@@ -190,6 +200,56 @@ static bool ValidateHostTextureState(const DeviceVal& device, uint32_t i, const 
     return true;
 }
 
+static inline bool ValidateResolveAttachmentState(const DeviceVal& device, uint32_t i, const TextureDesc& textureDesc, PlaneBits planes, const AccessLayoutStage& state, const char* stateName) {
+    bool source = state.access & AccessBits::RESOLVE_ATTACHMENT_SOURCE;
+    bool destination = state.access & AccessBits::RESOLVE_ATTACHMENT_DESTINATION;
+    if (!source && !destination)
+        return true;
+
+    NRI_RETURN_ON_FAILURE(&device, textureDesc.sharingMode != SharingMode::SIMULTANEOUS, false,
+        "'barrierDesc.textures[%u].%s' attachment resolves do not support 'SharingMode::SIMULTANEOUS'", i, stateName);
+    NRI_RETURN_ON_FAILURE(&device, source != destination && !(state.access & (AccessBits::RESOLVE_SOURCE | AccessBits::RESOLVE_DESTINATION)), false,
+        "'barrierDesc.textures[%u].%s.access' mixes incompatible resolve accesses", i, stateName);
+    NRI_RETURN_ON_FAILURE(&device, state.stages == StageBits::ALL || (state.stages != StageBits::NONE && (state.stages & StageBits::RESOLVE_ATTACHMENT)), false,
+        "'barrierDesc.textures[%u].%s.stages' must include 'RESOLVE_ATTACHMENT'", i, stateName);
+
+    const FormatProps& formatProps = GetFormatProps(textureDesc.format);
+    bool depthStencil = formatProps.isDepth || formatProps.isStencil;
+    bool attachmentLayout = depthStencil
+        ? (state.layout == Layout::DEPTH_STENCIL_ATTACHMENT || state.layout == Layout::DEPTH_STENCIL_READONLY
+            || state.layout == Layout::DEPTH_READONLY_STENCIL_ATTACHMENT || state.layout == Layout::DEPTH_ATTACHMENT_STENCIL_READONLY)
+        : state.layout == Layout::COLOR_ATTACHMENT;
+    NRI_RETURN_ON_FAILURE(&device, attachmentLayout, false,
+        "'barrierDesc.textures[%u].%s.layout' must be a color or depth-stencil attachment layout compatible with the format", i, stateName);
+
+    if (destination && depthStencil) {
+        bool depth = formatProps.isDepth && (planes == PlaneBits::ALL || (planes & PlaneBits::DEPTH));
+        bool stencil = formatProps.isStencil && (planes == PlaneBits::ALL || (planes & PlaneBits::STENCIL));
+        NRI_RETURN_ON_FAILURE(&device, (!depth || !IsDepthReadOnly(state.layout)) && (!stencil || !IsStencilReadOnly(state.layout)), false,
+            "'barrierDesc.textures[%u].%s.layout' must make the attachment resolve destination planes writable", i, stateName);
+    }
+
+    return true;
+}
+
+static inline bool ValidateResolveAttachmentDesc(const DeviceVal& device, const DescriptorVal& source, const DescriptorVal& destination, PlaneBits planes) {
+    NRI_RETURN_ON_FAILURE(&device, source.GetSharingMode() != SharingMode::SIMULTANEOUS && destination.GetSharingMode() != SharingMode::SIMULTANEOUS, false,
+        "attachment resolves do not support 'SharingMode::SIMULTANEOUS'");
+    NRI_RETURN_ON_FAILURE(&device, source.GetLayout() != Layout::GENERAL && source.GetLayout() != Layout::INPUT_ATTACHMENT
+        && destination.GetLayout() != Layout::GENERAL && destination.GetLayout() != Layout::INPUT_ATTACHMENT, false,
+        "attachment resolves require color or depth-stencil attachment view layouts");
+    NRI_RETURN_ON_FAILURE(&device, source.GetSampleNum() > 1 && destination.GetSampleNum() == 1, false,
+        "attachment resolves require a multisampled source and a single-sample destination");
+    NRI_RETURN_ON_FAILURE(&device, source.GetFormat() == destination.GetFormat(), false,
+        "attachment resolve source and destination formats must match");
+    NRI_RETURN_ON_FAILURE(&device, !(planes & PlaneBits::DEPTH) || !IsDepthReadOnly(destination.GetLayout()), false,
+        "attachment resolve destination depth must be writable");
+    NRI_RETURN_ON_FAILURE(&device, !(planes & PlaneBits::STENCIL) || !IsStencilReadOnly(destination.GetLayout()), false,
+        "attachment resolve destination stencil must be writable");
+
+    return true;
+}
+
 static bool ValidateTextureBarrierDesc(const DeviceVal& device, uint32_t i, const TextureBarrierDesc& textureBarrier) {
     NRI_RETURN_ON_FAILURE(&device, textureBarrier.texture, false, "'barrierDesc.textures[%u].texture' is NULL", i);
     NRI_RETURN_ON_FAILURE(&device, textureBarrier.before.layout < Layout::MAX_NUM, false, "'barrierDesc.textures[%u].before.layout' is invalid", i);
@@ -219,6 +279,10 @@ static bool ValidateTextureBarrierDesc(const DeviceVal& device, uint32_t i, cons
     NRI_RETURN_ON_FAILURE(&device, IsTextureLayoutSupported(textureDesc, textureBarrier.after.layout), false,
         "'barrierDesc.textures[%u].after.layout' is not supported by the usage mask of the texture ('%s')", i, textureVal.GetDebugName());
     if (!ValidateHostTextureState(device, i, textureBarrier.before, "before") || !ValidateHostTextureState(device, i, textureBarrier.after, "after"))
+        return false;
+
+    if (!ValidateResolveAttachmentState(device, i, textureDesc, textureBarrier.planes, textureBarrier.before, "before")
+        || !ValidateResolveAttachmentState(device, i, textureDesc, textureBarrier.planes, textureBarrier.after, "after"))
         return false;
 
     constexpr AccessBits hostAccess = AccessBits::HOST_READ | AccessBits::HOST_WRITE;
@@ -264,7 +328,7 @@ static inline bool IsVideoPictureUsageValid(const VideoPictureVal& picture, Vide
     if (picture.GetUsage() == usage)
         return true;
 
-    return usage == VideoPictureUsage::DECODE_REFERENCE && picture.GetUsage() == VideoPictureUsage::DECODE_OUTPUT;
+    return usage == VideoPictureUsage::DECODE_REFERENCE && picture.GetUsage() == VideoPictureUsage::DECODE_OUTPUT && !picture.IsOutputOnly();
 }
 
 static inline bool IsVideoPictureValidForSession(const VideoPictureVal& picture, VideoPictureUsage usage, const VideoSessionDesc& sessionDesc) {
@@ -299,13 +363,13 @@ static inline bool HasVideoAV1ReferenceName(const VideoAV1ReferenceDesc* referen
     return false;
 }
 
-static inline bool IsVideoEncodeH264ReferenceListValid(const VideoEncodeDesc& videoEncodeDesc, VideoFrameType frameType) {
+static inline bool IsVideoEncodeH264ReferenceListValid(const VideoEncodeDesc& videoEncodeDesc, VideoFrameType frameType, uint32_t& list0ReferenceNum, uint32_t& list1ReferenceNum) {
     const VideoH264EncodePictureDesc* h264PictureDesc = videoEncodeDesc.h264PictureDesc;
     if (!h264PictureDesc || h264PictureDesc->referenceNum != videoEncodeDesc.referenceNum || videoEncodeDesc.referenceNum > 16)
         return false;
 
-    uint32_t list0ReferenceNum = 0;
-    uint32_t list1ReferenceNum = 0;
+    list0ReferenceNum = 0;
+    list1ReferenceNum = 0;
     for (uint32_t i = 0; i < h264PictureDesc->referenceNum; i++) {
         const VideoH264EncodeReferenceDesc& reference = h264PictureDesc->references[i];
         if (!IsVideoFrameTypeValid(reference.frameType) || !video::HasReferenceSlot(videoEncodeDesc.references, videoEncodeDesc.referenceNum, reference.slot))
@@ -322,15 +386,15 @@ static inline bool IsVideoEncodeH264ReferenceListValid(const VideoEncodeDesc& vi
     return frameType != VideoFrameType::B || (list0ReferenceNum != 0 && list1ReferenceNum != 0);
 }
 
-static inline bool IsVideoEncodeH265ReferenceListValid(const VideoEncodeDesc& videoEncodeDesc, VideoFrameType frameType) {
+static inline bool IsVideoEncodeH265ReferenceListValid(const VideoEncodeDesc& videoEncodeDesc, VideoFrameType frameType, uint32_t& list0ReferenceNum, uint32_t& list1ReferenceNum) {
     if (!videoEncodeDesc.h265ReferenceDescs || videoEncodeDesc.referenceNum > 15)
         return false;
 
-    uint32_t list0ReferenceNum = 0;
-    uint32_t list1ReferenceNum = 0;
+    list0ReferenceNum = 0;
+    list1ReferenceNum = 0;
     for (uint32_t i = 0; i < videoEncodeDesc.referenceNum; i++) {
         const VideoH265ReferenceDesc* reference = video::FindReferenceDesc(videoEncodeDesc.h265ReferenceDescs, videoEncodeDesc.referenceNum, videoEncodeDesc.references[i].slot);
-        if (!reference || !IsVideoFrameTypeValid(reference->frameType))
+        if (!reference || !IsVideoFrameTypeValid(reference->frameType) || reference->longTerm)
             return false;
 
         if (reference->listIndex == 0)
@@ -356,6 +420,20 @@ static inline bool IsVideoAV1LoopRestorationDescValid(const VideoAV1LoopRestorat
     return desc.lrUvShift <= desc.lrUnitShift;
 }
 
+static inline bool IsVideoAV1CdefDescValid(const VideoAV1CdefDesc& desc) {
+    for (uint32_t i = 0; i < 8; i++) {
+        if (desc.yPrimaryStrength[i] > 15 || desc.ySecondaryStrength[i] > 3 || desc.uvPrimaryStrength[i] > 15 || desc.uvSecondaryStrength[i] > 3)
+            return false;
+    }
+
+    return true;
+}
+
+// AV1 "interpolation_filter" (4 = SWITCHABLE) and "TxMode"
+static inline bool AreVideoAV1PictureModesValid(uint8_t interpolationFilter, uint8_t txMode) {
+    return interpolationFilter <= video::av1::INTERPOLATION_FILTER_SWITCHABLE && txMode <= video::av1::TX_MODE_SELECT;
+}
+
 static inline bool IsVideoAV1InterFrameWithoutReferences(VideoFrameType frameType, uint32_t referenceNum) {
     return (frameType == VideoFrameType::P || frameType == VideoFrameType::B) && referenceNum == 0;
 }
@@ -373,15 +451,20 @@ static inline bool AreVideoDecodeSliceOffsetsValid(const uint32_t* offsets, uint
     return true;
 }
 
+static inline bool IsVideoAV1FilmGrainDescValid(const VideoAV1FilmGrainDesc& desc) {
+    return desc.numYPoints <= 14 && desc.numCbPoints <= 10 && desc.numCrPoints <= 10 && desc.grainScalingMinus8 <= 3 && desc.arCoeffLag <= 3 && desc.arCoeffShiftMinus6 <= 3 && desc.grainScaleShift <= 3 && desc.filmGrainParamsRefIdx < 8
+        && desc.cbOffset >= 0 && desc.cbOffset <= 511 && desc.crOffset >= 0 && desc.crOffset <= 511; // "cb_offset", "cr_offset": f(9)
+}
+
 static bool IsVideoAV1DecodePictureDescValid(const VideoDecodeDesc& videoDecodeDesc) {
     const VideoAV1DecodePictureDesc& desc = *videoDecodeDesc.av1PictureDesc;
-    if (desc.flags & VideoAV1PictureBits::APPLY_GRAIN)
+    if ((desc.flags & VideoAV1PictureBits::APPLY_GRAIN) && (!desc.filmGrain || !IsVideoAV1FilmGrainDescValid(*desc.filmGrain)))
         return false;
 
     if (desc.tileNum == 0 || desc.tileNum > 64 || !desc.tiles)
         return false;
 
-    if (desc.referenceNum > 8 || (desc.referenceNum != 0 && !desc.references))
+    if (desc.referenceNum > video::av1::DECODE_REFERENCE_DESC_MAX_NUM || (desc.referenceNum != 0 && !desc.references))
         return false;
 
     if (desc.references && !HasValidVideoAV1ReferenceKeys(desc.references, desc.referenceNum))
@@ -396,6 +479,14 @@ static bool IsVideoAV1DecodePictureDescValid(const VideoDecodeDesc& videoDecodeD
     if (IsVideoAV1InterFrameWithoutReferences(desc.frameType, videoDecodeDesc.referenceNum))
         return false;
 
+    // Inter frames code "ref_frame_idx" for every reference name (AV1 "uncompressed_header")
+    if (desc.frameType == VideoFrameType::P || desc.frameType == VideoFrameType::B) {
+        for (uint8_t name = (uint8_t)VideoAV1ReferenceName::LAST; name <= (uint8_t)VideoAV1ReferenceName::ALTREF; name++) {
+            if (!HasVideoAV1ReferenceName(desc.references, desc.referenceNum, (VideoAV1ReferenceName)name))
+                return false;
+        }
+    }
+
     for (uint32_t i = 0; i < desc.tileNum; i++) {
         const VideoAV1DecodeTileDesc& tile = desc.tiles[i];
         if (tile.offset >= videoDecodeDesc.bitstream.size || tile.size > videoDecodeDesc.bitstream.size - tile.offset)
@@ -405,10 +496,20 @@ static bool IsVideoAV1DecodePictureDescValid(const VideoDecodeDesc& videoDecodeD
     if (!IsVideoAV1ReferenceNameValid(desc.primaryReferenceName))
         return false;
 
+    if (desc.flags & VideoAV1PictureBits::SKIP_MODE_PRESENT) {
+        for (VideoAV1ReferenceName skipModeFrame : desc.skipModeFrames) {
+            if (skipModeFrame == VideoAV1ReferenceName::NONE || !IsVideoAV1ReferenceNameValid(skipModeFrame) || !HasVideoAV1ReferenceName(desc.references, desc.referenceNum, skipModeFrame))
+                return false;
+        }
+    }
+
     if (desc.tileLayout && !IsVideoAV1TileLayoutValid(*desc.tileLayout))
         return false;
 
     if (desc.loopRestoration && !IsVideoAV1LoopRestorationDescValid(*desc.loopRestoration))
+        return false;
+
+    if ((desc.cdef && !IsVideoAV1CdefDescValid(*desc.cdef)) || !AreVideoAV1PictureModesValid(desc.interpolationFilter, desc.txMode))
         return false;
 
     for (uint32_t i = 0; i < desc.referenceNum; i++) {
@@ -416,13 +517,13 @@ static bool IsVideoAV1DecodePictureDescValid(const VideoDecodeDesc& videoDecodeD
         if (!IsVideoAV1ReferenceNameValid(reference.name) || !IsVideoFrameTypeValid(reference.frameType) || reference.refFrameIndex >= 8)
             return false;
 
-        if (reference.name != VideoAV1ReferenceName::NONE && !video::HasReferenceSlot(videoDecodeDesc.references, videoDecodeDesc.referenceNum, reference.slot))
+        // Also "NONE" entries: D3D12 maps every reference frame map entry to a reference picture
+        if (!video::HasReferenceSlot(videoDecodeDesc.references, videoDecodeDesc.referenceNum, reference.slot))
             return false;
     }
 
     for (uint32_t i = 0; i < videoDecodeDesc.referenceNum; i++) {
-        const VideoAV1ReferenceDesc* reference = video::FindReferenceDesc(desc.references, desc.referenceNum, videoDecodeDesc.references[i].slot);
-        if (!reference || reference->name == VideoAV1ReferenceName::NONE)
+        if (!video::FindReferenceDesc(desc.references, desc.referenceNum, videoDecodeDesc.references[i].slot))
             return false;
     }
 
@@ -444,6 +545,9 @@ static bool IsVideoAV1EncodePictureDescValid(const VideoEncodeDesc& videoEncodeD
         return false;
 
     if (desc.loopRestoration && !IsVideoAV1LoopRestorationDescValid(*desc.loopRestoration))
+        return false;
+
+    if ((desc.cdef && !IsVideoAV1CdefDescValid(*desc.cdef)) || !AreVideoAV1PictureModesValid(desc.interpolationFilter, desc.txMode))
         return false;
 
     if (desc.refreshFrameFlags && !videoEncodeDesc.reconstructedPicture)
@@ -671,7 +775,9 @@ NRI_INLINE void CommandBufferVal::BeginRendering(const RenderingDesc& renderingD
 
             NRI_RETURN_ON_FAILURE(&m_Device, resolveDstVal.IsColorAttachment(), ReturnVoid(), "'colors[%u].resolveDst' is not a 'COLOR_ATTACHMENT' descriptor", i);
             NRI_RETURN_ON_FAILURE(&m_Device, m_Device.GetFormatSupport(resolveDstVal.GetFormat()) & FormatSupportBits::MULTISAMPLE_RESOLVE, ReturnVoid(), "'colors[%u].resolveDst' format does not support 'FormatSupportBits::MULTISAMPLE_RESOLVE'", i);
-            NRI_RETURN_ON_FAILURE(&m_Device, resolveDstVal.GetFormat() == colorVal.GetFormat(), ReturnVoid(), "'colors[%u].resolveDst' format must match 'colors[%u].descriptor' format", i, i);
+
+            if (!ValidateResolveAttachmentDesc(m_Device, colorVal, resolveDstVal, PlaneBits::COLOR))
+                return;
 
             const ResolveOp resolveOp = renderingDesc.colors[i].resolveOp;
             if (resolveOp == ResolveOp::AVERAGE)
@@ -710,6 +816,8 @@ NRI_INLINE void CommandBufferVal::BeginRendering(const RenderingDesc& renderingD
         const ResolveOp resolveOp = renderingDesc.depth.resolveOp;
         const DescriptorVal& depthVal = *(DescriptorVal*)renderingDesc.depth.descriptor;
         const bool isStencilResolved = GetFormatProps(depthVal.GetFormat()).isStencil && !renderingDesc.stencil.descriptor;
+        if (!ValidateResolveAttachmentDesc(m_Device, depthVal, resolveDstVal, isStencilResolved ? (PlaneBits::DEPTH | PlaneBits::STENCIL) : PlaneBits::DEPTH))
+            return;
         if (resolveOp == ResolveOp::AVERAGE)
             NRI_RETURN_ON_FAILURE(&m_Device, !isStencilResolved, ReturnVoid(), "'depth.resolveOp': 'ResolveOp::AVERAGE' can't be used with a depth-stencil format without a separate 'stencil' attachment");
 
@@ -729,6 +837,8 @@ NRI_INLINE void CommandBufferVal::BeginRendering(const RenderingDesc& renderingD
         NRI_RETURN_ON_FAILURE(&m_Device, renderingDesc.stencil.descriptor, ReturnVoid(), "'stencil.resolveDst' is not NULL, but 'stencil.descriptor' is NULL");
         NRI_RETURN_ON_FAILURE(&m_Device, resolveDstVal.IsDepthStencilAttachment(), ReturnVoid(), "'stencil.resolveDst' is not a 'DEPTH_STENCIL_ATTACHMENT' descriptor");
         NRI_RETURN_ON_FAILURE(&m_Device, m_Device.GetFormatSupport(resolveDstVal.GetFormat()) & FormatSupportBits::MULTISAMPLE_RESOLVE, ReturnVoid(), "'stencil.resolveDst' format does not support 'FormatSupportBits::MULTISAMPLE_RESOLVE'");
+        if (!ValidateResolveAttachmentDesc(m_Device, *(const DescriptorVal*)renderingDesc.stencil.descriptor, resolveDstVal, PlaneBits::STENCIL))
+            return;
         NRI_RETURN_ON_FAILURE(&m_Device, renderingDesc.stencil.resolveOp != ResolveOp::AVERAGE, ReturnVoid(), "'stencil.resolveOp': 'ResolveOp::AVERAGE' can't be used with stencil");
         NRI_RETURN_ON_FAILURE(&m_Device, IsResolveOpSupported(deviceDesc.resolve.attachment.stencil, renderingDesc.stencil.resolveOp), ReturnVoid(),
             "'stencil.resolveOp': 'ResolveOp::%s' is not supported for stencil (see 'resolve.attachment')", g_ResolveOpNames[(size_t)renderingDesc.stencil.resolveOp]);
@@ -772,6 +882,8 @@ NRI_INLINE void CommandBufferVal::EndRendering() {
 
 NRI_INLINE void CommandBufferVal::SetVertexBuffers(uint32_t baseSlot, const VertexBufferDesc* vertexBufferDescs, uint32_t vertexBufferNum) {
     NRI_RETURN_ON_FAILURE(&m_Device, m_IsRecordingStarted, ReturnVoid(), "the command buffer must be in the recording state");
+    NRI_RETURN_ON_FAILURE(&m_Device, baseSlot <= m_Device.GetDesc().shaderStage.vertex.streamMaxNum && vertexBufferNum <= (m_Device.GetDesc().shaderStage.vertex.streamMaxNum - baseSlot), ReturnVoid(), "the vertex buffer slot range exceeds 'shaderStage.vertex.streamMaxNum'");
+    NRI_RETURN_ON_FAILURE(&m_Device, vertexBufferNum == 0 || vertexBufferDescs != nullptr, ReturnVoid(), "'vertexBufferDescs' is NULL");
 
     Scratch<VertexBufferDesc> vertexBufferDescsImpl = NRI_ALLOCATE_SCRATCH(m_Device, VertexBufferDesc, vertexBufferNum);
     for (uint32_t i = 0; i < vertexBufferNum; i++) {
@@ -922,7 +1034,7 @@ NRI_INLINE void CommandBufferVal::DrawIndirect(const Buffer& buffer, uint64_t of
     NRI_RETURN_ON_FAILURE(&m_Device, !countBuffer || deviceDesc.features.drawIndirectCount, ReturnVoid(), "'countBuffer' is not supported");
 
     const PipelineLayoutDesc& pipelineLayoutDesc = m_PipelineLayout->GetPipelineLayoutDesc();
-    bool enableDrawParametersEmulation = IsDrawParametersEmulationEnabled(pipelineLayoutDesc);
+    bool enableDrawParametersEmulation = IsDrawParametersEmulationEnabled(deviceDesc.graphicsAPI, pipelineLayoutDesc);
     uint32_t minStride = enableDrawParametersEmulation ? sizeof(DrawBaseDesc) : sizeof(DrawDesc);
     NRI_RETURN_ON_FAILURE(&m_Device, stride >= minStride, ReturnVoid(), "'stride' is too small, expected >= %u", minStride);
     NRI_RETURN_ON_FAILURE(&m_Device, (stride % 4) == 0, ReturnVoid(), "'stride' must be 4-byte aligned");
@@ -942,7 +1054,7 @@ NRI_INLINE void CommandBufferVal::DrawIndexedIndirect(const Buffer& buffer, uint
     NRI_RETURN_ON_FAILURE(&m_Device, !countBuffer || deviceDesc.features.drawIndirectCount, ReturnVoid(), "'countBuffer' is not supported");
 
     const PipelineLayoutDesc& pipelineLayoutDesc = m_PipelineLayout->GetPipelineLayoutDesc();
-    bool enableDrawParametersEmulation = IsDrawParametersEmulationEnabled(pipelineLayoutDesc);
+    bool enableDrawParametersEmulation = IsDrawParametersEmulationEnabled(deviceDesc.graphicsAPI, pipelineLayoutDesc);
     uint32_t minStride = enableDrawParametersEmulation ? sizeof(DrawIndexedBaseDesc) : sizeof(DrawIndexedDesc);
     NRI_RETURN_ON_FAILURE(&m_Device, stride >= minStride, ReturnVoid(), "'stride' is too small, expected >= %u", minStride);
     NRI_RETURN_ON_FAILURE(&m_Device, (stride % 4) == 0, ReturnVoid(), "'stride' must be 4-byte aligned");
@@ -1065,12 +1177,16 @@ NRI_INLINE void CommandBufferVal::ZeroBuffer(Buffer& buffer, uint64_t offset, ui
     NRI_RETURN_ON_FAILURE(&m_Device, m_IsRecordingStarted, ReturnVoid(), "the command buffer must be in the recording state");
     NRI_RETURN_ON_FAILURE(&m_Device, !m_IsRenderPass, ReturnVoid(), "must be called outside of 'CmdBeginRendering/CmdEndRendering'");
 
+    const BufferDesc& bufferDesc = ((BufferVal&)buffer).GetDesc();
     if (size == WHOLE_SIZE) {
         NRI_RETURN_ON_FAILURE(&m_Device, offset == 0, ReturnVoid(), "'WHOLE_SIZE' is used but 'offset' is not 0");
     } else {
-        const BufferDesc& bufferDesc = ((BufferVal&)buffer).GetDesc();
         NRI_RETURN_ON_FAILURE(&m_Device, offset + size <= bufferDesc.size, ReturnVoid(), "'offset + size' > buffer.size");
     }
+
+    const uint64_t resolvedSize = size == WHOLE_SIZE ? bufferDesc.size : size;
+    NRI_RETURN_ON_FAILURE(&m_Device, IsAligned(offset, 4), ReturnVoid(), "'offset=%" PRIu64 "' must be 4-byte aligned", offset);
+    NRI_RETURN_ON_FAILURE(&m_Device, IsAligned(resolvedSize, 4), ReturnVoid(), "'resolved size=%" PRIu64 "' must be 4-byte aligned", resolvedSize);
 
     Buffer* bufferImpl = NRI_GET_IMPL(Buffer, &buffer);
 
@@ -1122,8 +1238,11 @@ NRI_INLINE void CommandBufferVal::Barrier(const BarrierDesc& barrierDesc) {
     Scratch<BufferBarrierDesc> buffers = NRI_ALLOCATE_SCRATCH(m_Device, BufferBarrierDesc, barrierDesc.bufferNum);
     if (barrierDesc.bufferNum > 0) {
         memcpy(buffers, barrierDesc.buffers, sizeof(BufferBarrierDesc) * barrierDesc.bufferNum);
-        for (uint32_t i = 0; i < barrierDesc.bufferNum; i++)
+        for (uint32_t i = 0; i < barrierDesc.bufferNum; i++) {
             buffers[i].buffer = NRI_GET_IMPL(Buffer, barrierDesc.buffers[i].buffer);
+            buffers[i].srcQueue = barrierDesc.buffers[i].srcQueue == EXTERNAL_QUEUE ? EXTERNAL_QUEUE : NRI_GET_IMPL(Queue, barrierDesc.buffers[i].srcQueue);
+            buffers[i].dstQueue = barrierDesc.buffers[i].dstQueue == EXTERNAL_QUEUE ? EXTERNAL_QUEUE : NRI_GET_IMPL(Queue, barrierDesc.buffers[i].dstQueue);
+        }
     }
 
     Scratch<TextureBarrierDesc> textures = NRI_ALLOCATE_SCRATCH(m_Device, TextureBarrierDesc, barrierDesc.textureNum);
@@ -1131,8 +1250,8 @@ NRI_INLINE void CommandBufferVal::Barrier(const BarrierDesc& barrierDesc) {
         memcpy(textures, barrierDesc.textures, sizeof(TextureBarrierDesc) * barrierDesc.textureNum);
         for (uint32_t i = 0; i < barrierDesc.textureNum; i++) {
             textures[i].texture = NRI_GET_IMPL(Texture, barrierDesc.textures[i].texture);
-            textures[i].srcQueue = NRI_GET_IMPL(Queue, barrierDesc.textures[i].srcQueue);
-            textures[i].dstQueue = NRI_GET_IMPL(Queue, barrierDesc.textures[i].dstQueue);
+            textures[i].srcQueue = barrierDesc.textures[i].srcQueue == EXTERNAL_QUEUE ? EXTERNAL_QUEUE : NRI_GET_IMPL(Queue, barrierDesc.textures[i].srcQueue);
+            textures[i].dstQueue = barrierDesc.textures[i].dstQueue == EXTERNAL_QUEUE ? EXTERNAL_QUEUE : NRI_GET_IMPL(Queue, barrierDesc.textures[i].dstQueue);
         }
     }
 
@@ -1285,15 +1404,21 @@ NRI_INLINE void CommandBufferVal::BuildBottomLevelAccelerationStructure(const Bu
         for (uint32_t j = 0; j < desc.geometryNum; j++) {
             const BottomLevelGeometryDesc& geometry = desc.geometries[j];
             NRI_RETURN_ON_FAILURE(&m_Device, geometry.type < BottomLevelGeometryType::MAX_NUM, ReturnVoid(), "'[%u].geometries[%u].type' is invalid", i, j);
+
             if (geometry.type == BottomLevelGeometryType::TRIANGLES) {
+                NRI_RETURN_ON_FAILURE(&m_Device, geometry.triangles.vertexBuffer != HAS_BUFFER, ReturnVoid(), "'[%u].geometries[%u].triangles.vertexBuffer' is HAS_BUFFER (only allowed in 'AccelerationStructureDesc')", i, j);
+                NRI_RETURN_ON_FAILURE(&m_Device, geometry.triangles.indexBuffer != HAS_BUFFER, ReturnVoid(), "'[%u].geometries[%u].triangles.indexBuffer' is HAS_BUFFER (only allowed in 'AccelerationStructureDesc')", i, j);
+                NRI_RETURN_ON_FAILURE(&m_Device, geometry.triangles.transformBuffer != HAS_BUFFER, ReturnVoid(), "'[%u].geometries[%u].triangles.transformBuffer' is HAS_BUFFER (only allowed in 'AccelerationStructureDesc')", i, j);
                 NRI_RETURN_ON_FAILURE(&m_Device, geometry.triangles.vertexFormat < Format::MAX_NUM, ReturnVoid(), "'[%u].geometries[%u].triangles.vertexFormat' is invalid", i, j);
                 NRI_RETURN_ON_FAILURE(&m_Device, geometry.triangles.indexType < IndexType::MAX_NUM, ReturnVoid(), "'[%u].geometries[%u].triangles.indexType' is invalid", i, j);
 
                 if (geometry.triangles.micromap) {
+                    NRI_RETURN_ON_FAILURE(&m_Device, geometry.triangles.micromap->indexBuffer != HAS_BUFFER, ReturnVoid(), "'[%u].geometries[%u].triangles.micromap->indexBuffer' is HAS_BUFFER (only allowed in 'AccelerationStructureDesc')", i, j);
                     NRI_RETURN_ON_FAILURE(&m_Device, m_Device.GetDesc().tiers.rayTracing >= 3, ReturnVoid(), "'[%u].geometries[%u].triangles.micromap' requires 'tiers.rayTracing >= 3'", i, j);
                     NRI_RETURN_ON_FAILURE(&m_Device, geometry.triangles.micromap->indexType < IndexType::MAX_NUM, ReturnVoid(), "'[%u].geometries[%u].triangles.micromap->indexType' is invalid", i, j);
                 }
-            }
+            } else
+                NRI_RETURN_ON_FAILURE(&m_Device, geometry.aabbs.buffer != HAS_BUFFER, ReturnVoid(), "'[%u].geometries[%u].aabbs.buffer' is HAS_BUFFER (only allowed in 'AccelerationStructureDesc')", i, j);
 
             if (geometry.type == BottomLevelGeometryType::TRIANGLES && geometry.triangles.micromap)
                 micromapTotalNum++;
@@ -1545,9 +1670,19 @@ NRI_INLINE void CommandBufferVal::DecodeVideo(const VideoDecodeDesc& videoDecode
         NRI_RETURN_ON_FAILURE(&m_Device, IsVideoPictureValidForSession(setupPictureVal, VideoPictureUsage::DECODE_REFERENCE, sessionVal.GetDesc()), ReturnVoid(), "'setupPicture' must have decode reference usage and match the session format, codec and coded extent");
 
         isDpbAndOutputDistinct = !setupPictureVal.IsSameSubresource(dstPictureVal);
+        NRI_RETURN_ON_FAILURE(&m_Device, !isDpbAndOutputDistinct || setupPictureVal.IsSameExtent(dstPictureVal), ReturnVoid(), "a distinct 'setupPicture' must have the same picture and texture extents as 'dstPicture'");
+
+        // Distinct support covers the session extent (D3D12 converts between the whole textures)
+        const VideoSessionDesc& sessionDesc = sessionVal.GetDesc();
+        NRI_RETURN_ON_FAILURE(&m_Device, !isDpbAndOutputDistinct || (setupPictureVal.HasTextureExtent(sessionDesc.width, sessionDesc.height) && dstPictureVal.HasTextureExtent(sessionDesc.width, sessionDesc.height)), ReturnVoid(), "distinct 'dstPicture' and 'setupPicture' textures must have the session extent");
     }
 
-    NRI_RETURN_ON_FAILURE(&m_Device, isDpbAndOutputDistinct ? capabilities.decodeDpbAndOutputDistinct : capabilities.decodeDpbAndOutputCoincide, ReturnVoid(), "the video session does not support the requested decode output and DPB setup mode");
+    // VK: applying film grain requires a distinct setup picture, even if distinct mode isn't advertised for the session
+    const bool isFilmGrainApplied = videoDecodeDesc.av1PictureDesc && (videoDecodeDesc.av1PictureDesc->flags & VideoAV1PictureBits::APPLY_GRAIN);
+    NRI_RETURN_ON_FAILURE(&m_Device, !isFilmGrainApplied || sessionVal.GetDesc().av1FilmGrain, ReturnVoid(), "'APPLY_GRAIN' requires a session with 'av1FilmGrain'");
+    NRI_RETURN_ON_FAILURE(&m_Device, !isFilmGrainApplied || !sessionVal.GetDesc().maxReferenceNum || isDpbAndOutputDistinct, ReturnVoid(), "'APPLY_GRAIN' requires a distinct 'setupPicture' (the reference must be the picture without film grain)");
+    NRI_RETURN_ON_FAILURE(&m_Device, isDpbAndOutputDistinct ? (capabilities.decodeDpbAndOutputDistinct || isFilmGrainApplied) : capabilities.decodeDpbAndOutputCoincide, ReturnVoid(), "the video session does not support the requested decode output and DPB setup mode");
+    NRI_RETURN_ON_FAILURE(&m_Device, videoDecodeDesc.setupPicture || !sessionVal.GetDesc().maxReferenceNum || !dstPictureVal.IsOutputOnly(), ReturnVoid(), "'dstPicture' uses a 'VIDEO_OUTPUT_ONLY' texture and can't be the DPB setup picture; provide a distinct 'setupPicture'");
 
     if (videoDecodeDesc.argumentNum > 10) {
         NRI_REPORT_ERROR(&m_Device, "'argumentNum' must be <= 10");
@@ -1561,12 +1696,18 @@ NRI_INLINE void CommandBufferVal::DecodeVideo(const VideoDecodeDesc& videoDecode
 
     NRI_RETURN_ON_FAILURE(&m_Device, IsVideoDecodeDpbLayoutValid(videoDecodeDesc, sessionVal.GetDesc().maxReferenceNum), ReturnVoid(), "'references' exceed the session capacity or contain duplicate slots");
 
+    const uint32_t setupSlot = video::GetDecodeSetupSlot(videoDecodeDesc);
+
     for (uint32_t i = 0; i < videoDecodeDesc.referenceNum; i++) {
+        NRI_RETURN_ON_FAILURE(&m_Device, setupSlot != videoDecodeDesc.references[i].slot, ReturnVoid(), "the decode setup slot must not match 'references[%u].slot'", i);
         NRI_RETURN_ON_FAILURE(&m_Device, videoDecodeDesc.references[i].picture, ReturnVoid(), "'references[%u].picture' is NULL", i);
 
         VideoPictureVal& pictureVal = *(VideoPictureVal*)videoDecodeDesc.references[i].picture;
         NRI_RETURN_ON_FAILURE(&m_Device, IsVideoPictureValidForSession(pictureVal, VideoPictureUsage::DECODE_REFERENCE, sessionVal.GetDesc()), ReturnVoid(), "'references[%u].picture' must have decode reference usage and match the session format, codec and coded extent", i);
+        NRI_RETURN_ON_FAILURE(&m_Device, !capabilities.decodeReferenceOnlyRequired || pictureVal.IsReferenceOnly(), ReturnVoid(), "the video session requires 'references[%u].picture' to use a 'VIDEO_REFERENCE_ONLY' texture", i);
     }
+
+    NRI_RETURN_ON_FAILURE(&m_Device, !capabilities.decodeReferenceOnlyRequired || !videoDecodeDesc.setupPicture || ((VideoPictureVal*)videoDecodeDesc.setupPicture)->IsReferenceOnly(), ReturnVoid(), "the video session requires 'setupPicture' to use a 'VIDEO_REFERENCE_ONLY' texture");
 
     const VideoPictureVal* effectiveSetupPictureVal = videoDecodeDesc.setupPicture ? (const VideoPictureVal*)videoDecodeDesc.setupPicture : &dstPictureVal;
     NRI_RETURN_ON_FAILURE(&m_Device, IsVideoDpbTextureArrayValid(effectiveSetupPictureVal, videoDecodeDesc.references, videoDecodeDesc.referenceNum, capabilities), ReturnVoid(), "the session requires all decode DPB pictures to use a texture array with at least 'VideoCapabilities::dpbTextureArrayMinLayerNum' layers");
@@ -1704,9 +1845,10 @@ NRI_INLINE void CommandBufferVal::EncodeVideo(const VideoEncodeDesc& videoEncode
         && videoEncodeDesc.dstBitstream.size <= dstBitstreamDesc.size - videoEncodeDesc.dstBitstream.offset
         && (capabilities.encodeBitstreamRangeSizeSupported || videoEncodeDesc.dstBitstream.size == dstBitstreamDesc.size - videoEncodeDesc.dstBitstream.offset)
         && videoEncodeDesc.bitstreamMetadataSize <= videoEncodeDesc.dstBitstream.size
+        && videoEncodeDesc.dstBitstream.size <= capabilities.bitstreamSizeMax
         && IsAligned(videoEncodeDesc.dstBitstream.offset, capabilities.bitstreamOffsetAlignment)
         && IsAligned(videoEncodeDesc.dstBitstream.size, capabilities.bitstreamSizeAlignment);
-    NRI_RETURN_ON_FAILURE(&m_Device, isDstBitstreamRangeValid, ReturnVoid(), "'dstBitstream' must be an aligned VIDEO_ENCODE buffer range containing 'bitstreamMetadataSize'; this session may require the range to extend to the end of the buffer");
+    NRI_RETURN_ON_FAILURE(&m_Device, isDstBitstreamRangeValid, ReturnVoid(), "'dstBitstream' must be an aligned VIDEO_ENCODE buffer range containing 'bitstreamMetadataSize' and within 'bitstreamSizeMax'; this session may require the range to extend to the end of the buffer");
     NRI_RETURN_ON_FAILURE(&m_Device, !capabilities.metadataSize || metadataVal, ReturnVoid(), "'metadata' is required by the video session");
 
     if (metadataVal) {
@@ -1717,6 +1859,15 @@ NRI_INLINE void CommandBufferVal::EncodeVideo(const VideoEncodeDesc& videoEncode
     NRI_RETURN_ON_FAILURE(&m_Device, &parametersVal.GetSession() == &sessionVal, ReturnVoid(), "'parameters' must belong to 'session'");
     NRI_RETURN_ON_FAILURE(&m_Device, !videoEncodeDesc.h264PictureDesc || sessionVal.GetDesc().codec == VideoCodec::H264, ReturnVoid(), "'h264PictureDesc' requires an H.264 session");
     NRI_RETURN_ON_FAILURE(&m_Device, !videoEncodeDesc.h265ReferenceDescs || sessionVal.GetDesc().codec == VideoCodec::H265, ReturnVoid(), "'h265ReferenceDescs' require an H.265 session");
+    NRI_RETURN_ON_FAILURE(&m_Device, !videoEncodeDesc.h265PictureDesc || sessionVal.GetDesc().codec == VideoCodec::H265, ReturnVoid(), "'h265PictureDesc' requires an H.265 session");
+
+    if (sessionVal.GetDesc().codec == VideoCodec::H265) {
+        const VideoH265EncodePictureDesc h265PictureDesc = videoEncodeDesc.h265PictureDesc ? *videoEncodeDesc.h265PictureDesc : VideoH265EncodePictureDesc{};
+        const bool isParameterSetValid = parametersVal.HasH265Parameters()
+            ? parametersVal.IsH265ParameterSetValid(h265PictureDesc.videoParameterSetId, h265PictureDesc.sequenceParameterSetId, h265PictureDesc.pictureParameterSetId)
+            : (h265PictureDesc.videoParameterSetId == 0 && h265PictureDesc.sequenceParameterSetId == 0 && h265PictureDesc.pictureParameterSetId == 0);
+        NRI_RETURN_ON_FAILURE(&m_Device, isParameterSetValid, ReturnVoid(), "'h265PictureDesc' must select a matching VPS/SPS/PPS chain from 'parameters' (all ids must be 0 for internal default parameters)");
+    }
     NRI_RETURN_ON_FAILURE(&m_Device, !videoEncodeDesc.av1PictureDesc || sessionVal.GetDesc().codec == VideoCodec::AV1, ReturnVoid(), "'av1PictureDesc' requires an AV1 session");
     const uint8_t h264SequenceParameterSetId = videoEncodeDesc.h264PictureDesc ? videoEncodeDesc.h264PictureDesc->sequenceParameterSetId : 0;
     const uint8_t h264PictureParameterSetId = videoEncodeDesc.h264PictureDesc ? videoEncodeDesc.h264PictureDesc->pictureParameterSetId : 0;
@@ -1748,6 +1899,7 @@ NRI_INLINE void CommandBufferVal::EncodeVideo(const VideoEncodeDesc& videoEncode
     NRI_RETURN_ON_FAILURE(&m_Device, IsVideoEncodeDpbLayoutValid(videoEncodeDesc, sessionVal.GetDesc().maxReferenceNum), ReturnVoid(), "'references' exceed the session capacity or contain duplicate slots");
 
     for (uint32_t i = 0; i < videoEncodeDesc.referenceNum; i++) {
+        NRI_RETURN_ON_FAILURE(&m_Device, !videoEncodeDesc.reconstructedPicture || videoEncodeDesc.reconstructedSlot != videoEncodeDesc.references[i].slot, ReturnVoid(), "'reconstructedSlot' must not match 'references[%u].slot'", i);
         NRI_RETURN_ON_FAILURE(&m_Device, videoEncodeDesc.references[i].picture, ReturnVoid(), "'references[%u].picture' is NULL", i);
 
         VideoPictureVal& pictureVal = *(VideoPictureVal*)videoEncodeDesc.references[i].picture;
@@ -1791,14 +1943,33 @@ NRI_INLINE void CommandBufferVal::EncodeVideo(const VideoEncodeDesc& videoEncode
         return;
     }
 
-    if (sessionVal.GetDesc().codec == VideoCodec::H264 && videoEncodeDesc.referenceNum && !IsVideoEncodeH264ReferenceListValid(videoEncodeDesc, frameType)) {
+    uint32_t list0ReferenceNum = 0;
+    uint32_t list1ReferenceNum = 0;
+    if (sessionVal.GetDesc().codec == VideoCodec::H264 && videoEncodeDesc.referenceNum && !IsVideoEncodeH264ReferenceListValid(videoEncodeDesc, frameType, list0ReferenceNum, list1ReferenceNum)) {
         NRI_REPORT_ERROR(&m_Device, "'h264PictureDesc->references' must describe every H.264 reference and B frames require List0 and List1 references");
         return;
     }
 
-    if (sessionVal.GetDesc().codec == VideoCodec::H265 && videoEncodeDesc.referenceNum && !IsVideoEncodeH265ReferenceListValid(videoEncodeDesc, frameType)) {
-        NRI_REPORT_ERROR(&m_Device, "'h265ReferenceDescs' must describe every H.265 reference and B frames require List0 and List1 references");
+    if (sessionVal.GetDesc().codec == VideoCodec::H265 && videoEncodeDesc.referenceNum && !IsVideoEncodeH265ReferenceListValid(videoEncodeDesc, frameType, list0ReferenceNum, list1ReferenceNum)) {
+        NRI_REPORT_ERROR(&m_Device, "'h265ReferenceDescs' must describe every H.265 reference with short-term references only (long-term encode references are unsupported) and B frames require List0 and List1 references");
         return;
+    }
+
+    if (!capabilities.encodeReferenceCountOverrideSupported && (sessionVal.GetDesc().codec == VideoCodec::H264 || sessionVal.GetDesc().codec == VideoCodec::H265) && (frameType == VideoFrameType::P || frameType == VideoFrameType::B)) {
+        const uint8_t ppsId = sessionVal.GetDesc().codec == VideoCodec::H264 ? h264PictureParameterSetId : (videoEncodeDesc.h265PictureDesc ? videoEncodeDesc.h265PictureDesc->pictureParameterSetId : 0);
+        NRI_RETURN_ON_FAILURE(&m_Device, parametersVal.AreEncodeReferenceCountsValid(ppsId, list0ReferenceNum, list1ReferenceNum, frameType == VideoFrameType::B), ReturnVoid(), "'encodeReferenceCountOverrideSupported' is false: active reference counts must match the selected PPS defaults");
+    }
+
+    // Without "lists_modification_present_flag" only the initial lists can be signaled (internal default parameters signal it)
+    const uint8_t h265PpsId = videoEncodeDesc.h265PictureDesc ? videoEncodeDesc.h265PictureDesc->pictureParameterSetId : 0;
+    const int32_t pictureOrderCount = videoEncodeDesc.pictureDesc ? videoEncodeDesc.pictureDesc->pictureOrderCount : 0;
+    if (sessionVal.GetDesc().codec == VideoCodec::H265 && videoEncodeDesc.referenceNum > 1 && parametersVal.HasH265Parameters() && !parametersVal.IsH265ListsModificationPresent(h265PpsId)) {
+        video::h265::EncodeReferenceLists lists = {};
+        video::h265::EncodeInitialLists initialLists = {};
+        const bool isInitial = video::h265::BuildEncodeReferenceLists(videoEncodeDesc.references, videoEncodeDesc.h265ReferenceDescs, videoEncodeDesc.referenceNum, frameType, pictureOrderCount, false, lists)
+            && video::h265::BuildEncodeInitialLists(videoEncodeDesc.references, videoEncodeDesc.h265ReferenceDescs, videoEncodeDesc.referenceNum, pictureOrderCount, lists, initialLists)
+            && video::h265::AreEncodeListsInitial(lists, initialLists);
+        NRI_RETURN_ON_FAILURE(&m_Device, isInitial, ReturnVoid(), "the PPS has no 'LISTS_MODIFICATION_PRESENT': H.265 List0/List1 must be in the initial reference picture list order (preceding pictures by descending, following pictures by ascending picture order count)");
     }
 
     if (videoEncodeDesc.av1PictureDesc && !IsVideoAV1EncodePictureDescValid(videoEncodeDesc)) {
@@ -1806,7 +1977,8 @@ NRI_INLINE void CommandBufferVal::EncodeVideo(const VideoEncodeDesc& videoEncode
         return;
     }
 
-    NRI_RETURN_ON_FAILURE(&m_Device, sessionVal.GetDesc().codec != VideoCodec::AV1 || videoEncodeDesc.av1PictureDesc || !sessionVal.GetDesc().maxReferenceNum || videoEncodeDesc.reconstructedPicture, ReturnVoid(), "default AV1 key frames in sessions with DPB slots require 'reconstructedPicture'");
+    // The setup slot is always written (VUID-vkCmdEncodeVideoKHR-pEncodeInfo-08377), also for non-reference pictures (B frames, AV1 "refreshFrameFlags = 0")
+    NRI_RETURN_ON_FAILURE(&m_Device, !sessionVal.GetDesc().maxReferenceNum || videoEncodeDesc.reconstructedPicture, ReturnVoid(), "'reconstructedPicture' is required in sessions with DPB slots ('maxReferenceNum' > 0), also for non-reference pictures");
 
     VideoEncodeDesc videoEncodeDescImpl = videoEncodeDesc;
     videoEncodeDescImpl.session = videoEncodeDesc.session ? ((VideoSessionVal*)videoEncodeDesc.session)->GetImpl() : nullptr;

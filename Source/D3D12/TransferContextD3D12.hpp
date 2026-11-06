@@ -11,11 +11,12 @@ TransferContextD3D12::~TransferContextD3D12() {
 Result TransferContextD3D12::Create(QueueD3D12& queue) {
     m_CommandListType = queue.GetType();
 
-    Result result = m_Device.CreateImplementation<FenceD3D12>(m_Fence, 0);
-    if (result != Result::SUCCESS)
-        return result;
+    FenceDesc fenceDesc = {};
+    Result result = m_Device.CreateImplementation<FenceD3D12>(m_Fence, fenceDesc);
 
-    result = m_Device.CreateImplementation<CommandAllocatorD3D12>(m_CommandAllocator, (Queue&)queue);
+    if (result == Result::SUCCESS)
+        result = m_Device.CreateImplementation<CommandAllocatorD3D12>(m_CommandAllocator, (Queue&)queue);
+
     if (result != Result::SUCCESS)
         return result;
 

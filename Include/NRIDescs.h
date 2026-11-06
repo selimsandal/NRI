@@ -80,6 +80,9 @@ static const uint32_t NriConstant(ALL) = 0;             // only for "sampleMask"
 static const Nri(Dim_t) NriConstant(WHOLE_SIZE) = 0;    // only for "Dim_t" and "size"
 static const Nri(Dim_t) NriConstant(REMAINING) = 0;     // only for "mipNum" and "layerNum"
 
+// Transfers ownership of a shared resource "to" or "from" an external user
+static NriPtr(Queue) const NriConstant(EXTERNAL_QUEUE) = (NriPtr(Queue))1;
+
 // Readability
 #define NriOptional // i.e. can be 0 (keep an eye on comments)
 #define NriOut      // highlights an output argument
@@ -96,6 +99,7 @@ static const Nri(Dim_t) NriConstant(REMAINING) = 0;     // only for "mipNum" and
 
 // "AdapterDesc::supportedGraphicsAPIs" is a mask of supported graphics APIs
 NriBits(GraphicsAPI, uint8_t,
+    ALL     = 0,         // lazy default for "desiredGraphicsAPIs" argument in "nriEnumerateAdapters"
     NONE    = NriBit(0), // Supports everything, does nothing, returns dummy non-NULL objects and ~0-filled descs, available if "NRI_ENABLE_NONE_SUPPORT = ON" in CMake
     D3D11   = NriBit(1), // Direct3D 11 (feature set 11.1), available if "NRI_ENABLE_D3D11_SUPPORT = ON" in CMake (https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm)
     D3D12   = NriBit(2), // Direct3D 12 (D3D12_SDK_VERSION 4 or 619+), available if "NRI_ENABLE_D3D12_SUPPORT = ON" in CMake (https://microsoft.github.io/DirectX-Specs/)
@@ -106,8 +110,9 @@ NriBits(GraphicsAPI, uint8_t,
 
 NriEnum(Result, int8_t,
     // All bad, but optionally require an action ("callbackInterface.AbortExecution" is not triggered)
+    NOT_READY               = -4,   // VK: zero surface extent during swap chain creation; WGPU: no swap chain texture available yet. Process window events and retry
     DEVICE_LOST             = -3,   // may be returned by "QueueSubmit*", "*WaitIdle", "AcquireNextTexture", "QueuePresent", "WaitForPresent"
-    OUT_OF_DATE             = -2,   // VK: swap chain is out of date, can be triggered if "features.resizableSwapChain" is not supported; D3D12: shader cache is stale
+    OUT_OF_DATE             = -2,   // VK/WGPU: swap chain is out of date, can be triggered if "features.resizableSwapChain" is not supported; D3D12: shader cache is stale
     INVALID_SDK             = -1,   // D3D12: some interfaces are missing (potential reasons: unable to load "D3D12Core.dll", version or SDK mismatch, developer mode is not enabled)
 
     // All good
@@ -432,6 +437,9 @@ NriBits(FormatSupportBits, uint32_t,
 //   - "AccessBits" corresponding with any relevant resource usage after the barrier completes
 //   - "StagesBits" of all subsequent GPU work that must wait until the barrier execution is finished (stages to halt until the barrier is executed)
 //   - "Layout" for textures
+// D3D12 enhanced texture barriers:
+//   - With a defined layout and stages other than "StageBits::NONE", "AccessBits::NONE" uses conservative "COMMON" access to preserve execution dependencies (may flush caches)
+//   - "StageBits::NONE" requires no accesses or barriers to the affected subresources on that side within the same "QueueSubmit" scope
 // If "features.enhancedBarriers" is not supported:
 //   - https://microsoft.github.io/DirectX-Specs/d3d/D3D12EnhancedBarriers.html#compatibility-with-legacy-d3d12_resource_states
 //   - "AccessBits::NONE" gets mapped to "COMMON" (aka "GENERAL" access), leading to potential discrepancies with VK
@@ -440,10 +448,10 @@ NriBits(FormatSupportBits, uint32_t,
 // https://microsoft.github.io/DirectX-Specs/d3d/D3D12EnhancedBarriers.html#d3d12_barrier_sync
 NriBits(StageBits, uint32_t,
     // Special
-    ALL                             = 0,            // Lazy default for barriers                          Shader stage
+    ALL                             = 0,            // Lazy default for barriers and "shaderStages"
     NONE                            = 0x7FFFFFFF,
 
-    // Graphics                                     // Invoked by "CmdDraw*"
+    // Graphics                                     // Invoked by "CmdDraw*"                              Shader stage
     INDEX_INPUT                     = NriBit(0),    //    Index buffer consumption
     VERTEX_SHADER                   = NriBit(1),    //    Vertex shader                                   X (required within GRAPHICS bind point)
     TESS_CONTROL_SHADER             = NriBit(2),    //    Tessellation control (hull) shader              X
@@ -469,20 +477,23 @@ NriBits(StageBits, uint32_t,
     ACCELERATION_STRUCTURE          = NriBit(18),   // Invoked by "Cmd*AccelerationStructure*" commands
     MICROMAP                        = NriBit(19),   // Invoked by "Cmd*Micromap*" commands
 
+    // Resolve
+    RESOLVE                         = NriBit(20),   // Invoked by "CmdResolveTexture"
+    RESOLVE_ATTACHMENT              = NriBit(21),   // Invoked by "AttachmentDesc::resolveDst"
+
     // Other
-    COPY                            = NriBit(20),   // Invoked by "CmdCopy*", "CmdUpload*" and "CmdReadback*"
-    RESOLVE                         = NriBit(21),   // Invoked by "CmdResolveTexture"
-    CLEAR_STORAGE                   = NriBit(22),   // Invoked by "CmdClearStorage"
+    COPY                            = NriBit(22),   // Invoked by "CmdCopy*", "CmdUpload*", "CmdReadback*" and "CmdZeroBuffer"
+    CLEAR_STORAGE                   = NriBit(23),   // Invoked by "CmdClearStorage"
 
     // Modifiers
-    INDIRECT                        = NriBit(23),   // Invoked by "Indirect" commands (used in addition to other bits)
+    INDIRECT                        = NriBit(24),   // Invoked by "Indirect" commands (used in addition to other bits)
 
     // Host
-    HOST                            = NriBit(24),   // Invoked by "UploadHostMemoryToTexture" and "ReadbackTextureToHostMemory"
+    HOST                            = NriBit(25),   // Invoked by "UploadHostMemoryToTexture" and "ReadbackTextureToHostMemory"
 
     // Video
-    VIDEO_DECODE                    = NriBit(25),   // Invoked by "CmdDecodeVideo"
-    VIDEO_ENCODE                    = NriBit(26),   // Invoked by "CmdEncodeVideo"
+    VIDEO_DECODE                    = NriBit(26),   // Invoked by "CmdDecodeVideo"
+    VIDEO_ENCODE                    = NriBit(27),   // Invoked by "CmdEncodeVideo"
 
     // Umbrella stages
     TESSELLATION_SHADERS            = NriMember(StageBits, TESS_CONTROL_SHADER)
@@ -504,15 +515,22 @@ NriBits(StageBits, uint32_t,
                                     | NriMember(StageBits, ANY_HIT_SHADER)
                                     | NriMember(StageBits, CALLABLE_SHADER),
 
+    // For descriptor and root visibility, "ALL" and "ALL_SHADERS" resolve to "PipelineLayoutDesc::shaderStages"
     ALL_SHADERS                     = NriMember(StageBits, GRAPHICS_SHADERS)
                                     | NriMember(StageBits, COMPUTE_SHADER)
                                     | NriMember(StageBits, RAY_TRACING_SHADERS),
 
+    ALL_ATTACHMENT                  = NriMember(StageBits, COLOR_ATTACHMENT)
+                                    | NriMember(StageBits, DEPTH_STENCIL_ATTACHMENT)
+                                    | NriMember(StageBits, SHADING_RATE_ATTACHMENT),
+
     GRAPHICS                        = NriMember(StageBits, INDEX_INPUT)
                                     | NriMember(StageBits, GRAPHICS_SHADERS)
-                                    | NriMember(StageBits, DEPTH_STENCIL_ATTACHMENT)
-                                    | NriMember(StageBits, COLOR_ATTACHMENT)
-                                    | NriMember(StageBits, SHADING_RATE_ATTACHMENT)
+                                    | NriMember(StageBits, ALL_ATTACHMENT),
+
+    // Resolve stages are explicit in "ALL_RESOLVE" and excluded from "ALL_ATTACHMENT" and "GRAPHICS"
+    ALL_RESOLVE                     = NriMember(StageBits, RESOLVE)
+                                    | NriMember(StageBits, RESOLVE_ATTACHMENT)
 );
 
 // https://docs.vulkan.org/refpages/latest/refpages/source/VkAccessFlagBits2.html
@@ -555,19 +573,21 @@ NriBits(AccessBits, uint32_t,
     // Resolve
     RESOLVE_SOURCE                  = NriBit(20),   // R        RESOLVE
     RESOLVE_DESTINATION             = NriBit(21),   //  W       RESOLVE
+    RESOLVE_ATTACHMENT_SOURCE       = NriBit(22),   // R        RESOLVE_ATTACHMENT
+    RESOLVE_ATTACHMENT_DESTINATION  = NriBit(23),   // RW       RESOLVE_ATTACHMENT
 
     // Clear storage
-    CLEAR_STORAGE                   = NriBit(22),   //  W       CLEAR_STORAGE
+    CLEAR_STORAGE                   = NriBit(24),   //  W       CLEAR_STORAGE
 
     // Host
-    HOST_READ                       = NriBit(23),   // R        HOST
-    HOST_WRITE                      = NriBit(24),   //  W       HOST
+    HOST_READ                       = NriBit(25),   // R        HOST
+    HOST_WRITE                      = NriBit(26),   //  W       HOST
 
     // Video
-    VIDEO_DECODE_READ               = NriBit(25),   // R        VIDEO_DECODE
-    VIDEO_DECODE_WRITE              = NriBit(26),   //  W       VIDEO_DECODE
-    VIDEO_ENCODE_READ               = NriBit(27),   // R        VIDEO_ENCODE
-    VIDEO_ENCODE_WRITE              = NriBit(28),   //  W       VIDEO_ENCODE
+    VIDEO_DECODE_READ               = NriBit(27),   // R        VIDEO_DECODE
+    VIDEO_DECODE_WRITE              = NriBit(28),   //  W       VIDEO_DECODE
+    VIDEO_ENCODE_READ               = NriBit(29),   // R        VIDEO_ENCODE
+    VIDEO_ENCODE_WRITE              = NriBit(30),   //  W       VIDEO_ENCODE
 
     // Umbrella access
     COLOR_ATTACHMENT                = NriMember(AccessBits, COLOR_ATTACHMENT_READ)
@@ -589,7 +609,7 @@ NriBits(AccessBits, uint32_t,
                                     | NriMember(AccessBits, VIDEO_ENCODE_WRITE)
 );
 
-// "Layout" is ignored if "features.enhancedBarriers" is not supported
+// Without "features.enhancedBarriers", "Layout" in barriers is used only for attachment resolve states
 // https://docs.vulkan.org/refpages/latest/refpages/source/VkImageLayout.html
 // https://microsoft.github.io/DirectX-Specs/d3d/D3D12EnhancedBarriers.html#d3d12_barrier_layout
 NriEnum(Layout, uint8_t,            // Compatible "AccessBits":
@@ -599,11 +619,12 @@ NriEnum(Layout, uint8_t,            // Compatible "AccessBits":
     PRESENT,                            // NONE (use "after.stages = StageBits::NONE")
 
     // Attachment
+    // Color and depth-stencil attachment layouts also support "RESOLVE_ATTACHMENT_SOURCE" access, writable planes support "RESOLVE_ATTACHMENT_DESTINATION" access
     COLOR_ATTACHMENT,                   // COLOR_ATTACHMENT_READ/WRITE
     DEPTH_STENCIL_ATTACHMENT,           // DEPTH_STENCIL_ATTACHMENT_READ/WRITE
-    DEPTH_READONLY_STENCIL_ATTACHMENT,  // DEPTH_STENCIL_ATTACHMENT_READ/WRITE (accessible "planes" = "STENCIL"), SHADER_RESOURCE (accessible "planes" = "DEPTH")
-    DEPTH_ATTACHMENT_STENCIL_READONLY,  // DEPTH_STENCIL_ATTACHMENT_READ/WRITE (accessible "planes" = "DEPTH"), SHADER_RESOURCE (accessible "planes" = "STENCIL")
-    DEPTH_STENCIL_READONLY,             // DEPTH_STENCIL_ATTACHMENT_READ  (accessible "planes" = "NONE"), SHADER_RESOURCE (D3D12: graphics queue only)
+    DEPTH_READONLY_STENCIL_ATTACHMENT,  // DEPTH_STENCIL_ATTACHMENT_READ/WRITE (only stencil writable), SHADER_RESOURCE (depth plane)
+    DEPTH_ATTACHMENT_STENCIL_READONLY,  // DEPTH_STENCIL_ATTACHMENT_READ/WRITE (only depth writable), SHADER_RESOURCE (stencil plane)
+    DEPTH_STENCIL_READONLY,             // DEPTH_STENCIL_ATTACHMENT_READ, SHADER_RESOURCE (D3D12: graphics queue only)
     SHADING_RATE_ATTACHMENT,            // SHADING_RATE_ATTACHMENT
     INPUT_ATTACHMENT,                   // COLOR_ATTACHMENT, INPUT_ATTACHMENT
 
@@ -638,6 +659,7 @@ NriStruct(AccessLayoutStage) {
 };
 
 NriStruct(GlobalBarrierDesc) {
+    // D3D12: global-barrier sides combining resolve and incompatible access scopes may promote stages to "ALL"
     Nri(AccessStage) before;
     Nri(AccessStage) after;
 };
@@ -646,6 +668,10 @@ NriStruct(BufferBarrierDesc) {
     NriPtr(Buffer) buffer;  // use "GetAccelerationStructureBuffer" and "GetMicromapBuffer" for related barriers
     Nri(AccessStage) before;
     Nri(AccessStage) after;
+
+    // Only for ownership transfers of shared buffers to or from an external user: use "EXTERNAL_QUEUE" and the local queue executing the barrier
+    NriOptional NriPtr(Queue) srcQueue;
+    NriOptional NriPtr(Queue) dstQueue;
 };
 
 NriStruct(TextureBarrierDesc) {
@@ -658,8 +684,8 @@ NriStruct(TextureBarrierDesc) {
     Nri(Dim_t) layerNum;    // can be "REMAINING"
     Nri(PlaneBits) planes;
 
-    // Queue ownership transfer is potentially needed only for "SharingMode::EXCLUSIVE" textures
-    // https://registry.khronos.org/vulkan/specs/latest/html/vkspec.html#synchronization-queue-transfers
+    // Specify both queues for a cross-queue hand-off; only "SharingMode::EXCLUSIVE" may need local ownership transfers.
+    // Transfers to or from an external user apply to any sharing mode: use "EXTERNAL_QUEUE" and the local queue executing the barrier
     NriOptional NriPtr(Queue) srcQueue;
     NriOptional NriPtr(Queue) dstQueue;
 };
@@ -689,18 +715,14 @@ NriEnum(TextureType, uint8_t,
     TEXTURE_3D  // arrays are unsupported
 );
 
-// NRI tries to ease your life and avoid using "queue ownership transfers" (see "TextureBarrierDesc").
-// In most of cases "SharingMode" can be ignored. Where is it needed?
-// - VK: use "EXCLUSIVE" for attachments participating into multi-queue activities to preserve DCC (Delta Color Compression) on some HW
-// - D3D12: use "SIMULTANEOUS" to concurrently use a texture as a "SHADER_RESOURCE" (or "SHADER_RESOURCE_STORAGE") and as a "COPY_DESTINATION" for non overlapping texture regions
-// https://docs.vulkan.org/refpages/latest/refpages/source/VkSharingMode.html
+// Texture sharing between local queues (see "TextureBarrierDesc")
 NriEnum(SharingMode, uint8_t,
-    CONCURRENT,     // VK: lazy default to avoid dealing with "queue ownership transfers", auto-optimized to "EXCLUSIVE" if all queues have the same type
-    EXCLUSIVE,      // VK: may be used for attachments to preserve DCC on some HW in the cost of making a "queue ownership transfer"
+    CONCURRENT,     // default; no ownership transfers between local queues
+    EXCLUSIVE,      // VK: may preserve attachment compression; may need local ownership transfers
 
     // https://microsoft.github.io/DirectX-Specs/d3d/D3D12EnhancedBarriers.html#single-queue-simultaneous-access
     // https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_resource_flags
-    SIMULTANEOUS    // D3D12: strengthened variant of "CONCURRENT", allowing simultaneous multiple readers and one writer for a texture (requires "Layout::GENERAL")
+    SIMULTANEOUS    // D3D12: concurrent reads and one write to non-overlapping regions (requires "Layout::GENERAL")
 );
 
 // https://docs.vulkan.org/refpages/latest/refpages/source/VkImageUsageFlagBits.html
@@ -716,7 +738,8 @@ NriBits(TextureUsageBits, uint16_t,                 // Min compatible access:   
     HOST_TRANSFER                       = NriBit(6),    // HOST_READ/HOST_WRITE                     Synchronous copy between texture and host memory
     VIDEO_DECODE                        = NriBit(7),    // VIDEO_DECODE                             Video decode output / DPB picture
     VIDEO_ENCODE                        = NriBit(8),    // VIDEO_ENCODE                             Video encode input / DPB picture
-    VIDEO_REFERENCE_ONLY                = NriBit(9)     // VIDEO_*                                  Video DPB/reference-only allocation
+    VIDEO_REFERENCE_ONLY                = NriBit(9),    // VIDEO_*                                  Video DPB/reference-only allocation
+    VIDEO_OUTPUT_ONLY                   = NriBit(10)    // VIDEO_*                                  Video decode output / encode input never used as a DPB picture (required if "decodeDpbAndOutputCoincide" is false; encode: pair with "VIDEO_REFERENCE_ONLY" DPB textures, VK may not support the combined usage)
 );
 
 // https://docs.vulkan.org/refpages/latest/refpages/source/VkBufferUsageFlagBits.html
@@ -757,10 +780,12 @@ NriStruct(TextureDesc) {
     NriOptional Nri(Sample_t) sampleNum;
     NriOptional Nri(SharingMode) sharingMode;
     NriOptional Nri(VideoCodec) videoCodec;             // VK: required for video textures
+    NriOptional bool videoAV1FilmGrain;                 // VK: AV1 decode textures of sessions with "VideoSessionDesc::av1FilmGrain"
     NriOptional Nri(ClearValue) optimizedClearValue;    // D3D12: not needed on desktop, since any HW can track many clear values
+    NriOptional bool shared;                            // "GetTextureSharedHandle": requires "CreateCommittedTexture" in "DEVICE" memory and "features.sharedResources"
 };
 
-// - VK: buffers are always created with sharing mode "CONCURRENT" to match D3D12 spec
+// - Buffers can move between local queues without ownership transfers
 // - D3D11: "structureStride != 0" locks this buffer to a single "STRUCTURED" layout, unless "byteAddress" is set to "true"
 // - D3D11: "byteAddress = true" allows to create multiple "STRUCTURED" views for a single resource by treating a "STRUCTURED" view as "BYTE_ADDRESS" (spec violation)
 // - WGPU: typed buffer views are unsupported (i.e. "structureStride = 0" and "byteAddress = false")
@@ -769,6 +794,7 @@ NriStruct(BufferDesc) {
     uint32_t structureStride;   // enable "STRUCTURED" views
     Nri(BufferUsageBits) usage;
     bool byteAddress;           // enable "BYTE_ADDRESS" views
+    NriOptional bool shared;    // "GetBufferSharedHandle": requires "CreateCommittedBuffer" in "DEVICE" memory and "features.sharedResources"
 };
 
 #pragma endregion
@@ -831,6 +857,32 @@ NriStruct(BindTextureMemoryDesc) {
     NriPtr(Texture) texture;
     NriPtr(Memory) memory;
     uint64_t offset; // in memory
+};
+
+#pragma endregion
+
+//============================================================================================================================================================================================
+#pragma region [ Shared handles ]
+//============================================================================================================================================================================================
+
+// Shared handles export buffers, textures and fences to an external user:
+// - To use imported objects in NRI, import natively first, then use the wrapper extensions
+// - Resource exports are dedicated allocations
+// - CUDA: VK timeline fences require "TimelineSemaphoreWin32/Fd" imports, binary semaphores use "OpaqueWin32/Fd"
+// - After an FD import takes ownership, clear "SharedHandle" instead of destroying it
+// - VK: unsupported resource/semaphore export configurations return "UNSUPPORTED"
+NriEnum(SharedHandleType, uint8_t,
+    NONE,
+    OPAQUE_WIN32,       // VK opaque NT handle
+    OPAQUE_FD,          // VK opaque file descriptor
+    D3D12_RESOURCE,     // D3D12 resource NT handle
+    D3D12_FENCE         // D3D12 fence NT handle
+);
+
+NriStruct(SharedHandle) {
+    void* handle;               // caller-owned NT handle or FD cast to a pointer (FD 0 is valid); see "DestroySharedHandle"
+    Nri(SharedHandleType) type;
+    uint64_t size;              // allocation size in bytes for import (0 for fences)
 };
 
 #pragma endregion
@@ -937,15 +989,18 @@ NriStruct(ComponentMapping) {
 NriStruct(TextureViewDesc) {
     const NriPtr(Texture) texture;
     Nri(TextureView) type;
-    Nri(Format) format;
+    NriOptional Nri(Format) format;         // inherits "TextureDesc::format" if "UNKNOWN"
     Nri(Dim_t) mipOffset;
     Nri(Dim_t) mipNum;                      // can be "REMAINING"
-    Nri(Dim_t) layerOffset;
-    Nri(Dim_t) layerNum;                    // can be "REMAINING"
+    Nri(Dim_t) layerOffset;                 // 0 for "TEXTURE_3D" (D3D11: must be 0 for "STORAGE_TEXTURE")
+    Nri(Dim_t) layerNum;                    // can be "REMAINING"; array views may expose 1 layer (6 for cube arrays)
     Nri(Dim_t) sliceOffset;
     Nri(Dim_t) sliceNum;                    // can be "REMAINING" (METAL: used only by "CmdClearStorage", shader views expose all slices, attachments use "sliceOffset")
-    Nri(PlaneBits) planes;                  // accessible planes (missing planes for a "DEPTH_STENCIL_ATTACHMENT" are considered read-only)
+    Nri(PlaneBits) planes;                  // accessible planes (missing planes are read-only for "DEPTH_STENCIL_ATTACHMENT" if "layout" is not provided, i.e. "UNDEFINED")
     Nri(ComponentMapping) components;
+
+    // Overrides the expected access-time layout without transitioning the texture. May be any layout compatible with the view and texture usage, including fully or partially read-only depth-stencil layouts
+    NriOptional Nri(Layout) layout;         // auto-derived from the "type" and "planes" if "UNDEFINED"
 };
 
 NriStruct(BufferViewDesc) {
@@ -1014,13 +1069,8 @@ NriBits(PipelineLayoutBits, uint8_t,
 
 NriBits(DescriptorPoolBits, uint8_t,
     NONE                                    = 0,
-    ALLOW_UPDATE_AFTER_SET                  = NriBit(0),    // allows "DescriptorSetBits::ALLOW_UPDATE_AFTER_SET"
+    ALLOW_UPDATE_AFTER_SET                  = NriBit(0),    // required by sets containing "DescriptorRangeBits::ALLOW_UPDATE_AFTER_SET" ranges
     COPY_SOURCE                             = NriBit(1)     // allows allocated descriptor sets to be used as sources in "CopyDescriptorRanges"; such sets can't be bound
-);
-
-NriBits(DescriptorSetBits, uint8_t,
-    NONE                                    = 0,
-    ALLOW_UPDATE_AFTER_SET                  = NriBit(0)     // allows "DescriptorRangeBits::ALLOW_UPDATE_AFTER_SET"
 );
 
 // https://docs.vulkan.org/refpages/latest/refpages/source/VkDescriptorBindingFlagBits.html
@@ -1081,7 +1131,6 @@ NriStruct(DescriptorSetDesc) {
     uint32_t registerSpace;             // must be unique, avoid big gaps
     const NriPtr(DescriptorRangeDesc) ranges;
     uint32_t rangeNum;
-    Nri(DescriptorSetBits) flags;
 };
 
 // "PipelineLayout" consists of "DescriptorSet" descriptions and root parameters
@@ -1674,13 +1723,18 @@ NriStruct(ResolveOps) {
     Nri(ResolveOpBits) stencil;
 };
 
+// If "resolveDst" is specified, this attachment must be multisampled. Add "RESOLVE_ATTACHMENT_SOURCE" access and "RESOLVE_ATTACHMENT" stage to its drawing accesses and stages
 NriStruct(AttachmentDesc) {
-    NriPtr(Descriptor) descriptor;
+    NriPtr(Descriptor) descriptor;                    // attachment view
     Nri(ClearValue) clearValue;
     Nri(LoadOp) loadOp;
     Nri(StoreOp) storeOp;
-    Nri(ResolveOp) resolveOp;
-    NriOptional NriPtr(Descriptor) resolveDst;          // must be in "COLOR_ATTACHMENT" state and valid during "CmdEndRendering"
+    Nri(ResolveOp) resolveOp;                         // used if "resolveDst" is specified
+
+    // Prepare with "RESOLVE_ATTACHMENT_DESTINATION" access and "RESOLVE_ATTACHMENT" stage before "CmdBeginRendering".
+    // Both "descriptor" and "resolveDst" (if specified) must remain valid through "CmdEndRendering".
+    // Resolve views cannot use "GENERAL" or "INPUT_ATTACHMENT" layouts. "SharingMode::SIMULTANEOUS" textures are not supported.
+    NriOptional NriPtr(Descriptor) resolveDst;        // single-sample attachment view receiving resolved values from "descriptor"
 };
 
 // If "VK_KHR_dynamic_rendering" is not supported:
@@ -1836,6 +1890,11 @@ NriStruct(ReadbackTextureToHostMemoryDesc) {
     Nri(TextureRegionDesc) srcRegion;
     NriOptional uint32_t dstRowPitch;   // if rows are not tightly packed
     NriOptional uint32_t dstSlicePitch; // if slices are not tightly packed
+};
+
+NriStruct(FenceDesc) {
+    uint64_t initialValue;      // "SWAPCHAIN_SEMAPHORE" creates a binary semaphore (see "NRISwapChain.h")
+    NriOptional bool shared;    // "GetFenceSharedHandle": requires "features.sharedFences"; D3D12: unsupported for binary semaphores
 };
 
 // Work submission
@@ -2229,11 +2288,16 @@ NriStruct(DeviceDesc) {
         bool presentFromCompute;                                  // see "SwapChainDesc::queue"
         bool waitableSwapChain;                                   // see "SwapChainDesc::waitable"
         bool resizableSwapChain;                                  // swap chain can be resized without triggering an "OUT_OF_DATE" error
+        bool latestReadySwapChain;                                // see "SwapChainBits::LATEST_READY"
 
         // Multi view
         bool flexibleMultiview;                                   // see "Multiview::FLEXIBLE"
         bool layerBasedMultiview;                                 // see "Multiview::LAYRED_BASED"
         bool viewportBasedMultiview;                              // see "Multiview::VIEWPORT_BASED"
+
+        // Shared handles
+        bool sharedResources;                                     // see "BufferDesc::shared" and "TextureDesc::shared"
+        bool sharedFences;                                        // see "FenceDesc::shared"
 
         // Texture compression
         bool textureCompressionBC;                                // all "BC" texture formats are supported

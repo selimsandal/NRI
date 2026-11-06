@@ -408,7 +408,6 @@ Result ImguiImpl::Create(const ImguiDesc& imguiDesc) {
             descriptorSetDescs[IMGUI_TEXTURE_SET].registerSpace = IMGUI_TEXTURE_SET;
             descriptorSetDescs[IMGUI_TEXTURE_SET].ranges = descriptorSet1Ranges;
             descriptorSetDescs[IMGUI_TEXTURE_SET].rangeNum = GetCountOf(descriptorSet1Ranges);
-            descriptorSetDescs[IMGUI_TEXTURE_SET].flags = DescriptorSetBits::ALLOW_UPDATE_AFTER_SET;
         }
 
         PipelineLayoutDesc pipelineLayoutDesc = {};
@@ -447,10 +446,10 @@ Result ImguiImpl::Create(const ImguiDesc& imguiDesc) {
 
     { // Descriptor sets
         Result result = m_iCore.AllocateDescriptorSets(*m_DescriptorPool, *m_PipelineLayout, IMGUI_SAMPLER_SET, &m_DescriptorSet0_sampler, 1, 0);
-        if (result != Result::SUCCESS)
-            return result;
 
-        result = m_iCore.AllocateDescriptorSets(*m_DescriptorPool, *m_PipelineLayout, IMGUI_TEXTURE_SET, m_DescriptorSets1.data(), (uint32_t)m_DescriptorSets1.size(), 0);
+        if (result == Result::SUCCESS)
+            result = m_iCore.AllocateDescriptorSets(*m_DescriptorPool, *m_PipelineLayout, IMGUI_TEXTURE_SET, m_DescriptorSets1.data(), (uint32_t)m_DescriptorSets1.size(), 0);
+
         if (result != Result::SUCCESS)
             return result;
     }

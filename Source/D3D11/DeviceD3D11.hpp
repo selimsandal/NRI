@@ -389,6 +389,9 @@ Result DeviceD3D11::Create(const DeviceCreationDesc& desc, const DeviceCreationD
 
         for (uint32_t j = 0; j < queueFamilyDesc.queueNum; j++) {
             QueueD3D11* queue = Allocate<QueueD3D11>(GetAllocationCallbacks(), *this);
+            if (!queue)
+                return Result::OUT_OF_MEMORY;
+
             queueFamily.push_back(queue);
         }
 
@@ -400,8 +403,10 @@ Result DeviceD3D11::Create(const DeviceCreationDesc& desc, const DeviceCreationD
         zeroBufferDesc.ByteWidth = desc.d3dZeroBufferSize ? desc.d3dZeroBufferSize : NRI_ZERO_BUFFER_SIZE;
         zeroBufferDesc.Usage = D3D11_USAGE_DEFAULT;
 
-        auto& allocator = GetAllocationCallbacks();
-        uint8_t* zeros = (uint8_t*)allocator.Allocate(allocator.userArg, zeroBufferDesc.ByteWidth, 16);
+        Scratch<uint8_t> zeros = NRI_ALLOCATE_SCRATCH(*this, uint8_t, zeroBufferDesc.ByteWidth);
+        if (!zeros)
+            return Result::OUT_OF_MEMORY;
+
         memset(zeros, 0, zeroBufferDesc.ByteWidth);
 
         D3D11_SUBRESOURCE_DATA data = {};
@@ -409,8 +414,6 @@ Result DeviceD3D11::Create(const DeviceCreationDesc& desc, const DeviceCreationD
 
         hr = m_Device->CreateBuffer(&zeroBufferDesc, &data, &m_ZeroBuffer);
         NRI_RETURN_ON_BAD_HRESULT(this, hr, "ID3D11Device::CreateBuffer");
-
-        allocator.Free(allocator.userArg, zeros);
     }
 
     // Fill desc
@@ -769,6 +772,58 @@ void DeviceD3D11::GetMemoryDesc(const TextureDesc& textureDesc, MemoryLocation m
 
 void DeviceD3D11::Destruct() {
     Destroy(GetAllocationCallbacks(), this);
+}
+
+NRI_INLINE Result DeviceD3D11::CreateCommittedBuffer(MemoryLocation memoryLocation, float priority, const BufferDesc& bufferDesc, Buffer*& buffer) {
+    Result result = CreateImplementation<BufferD3D11>(buffer, bufferDesc);
+
+    if (result == Result::SUCCESS)
+        result = ((BufferD3D11*)buffer)->Allocate(memoryLocation, priority);
+
+    if (result != Result::SUCCESS) {
+        Destroy((BufferD3D11*)buffer);
+        buffer = nullptr;
+    }
+
+    return result;
+}
+
+NRI_INLINE Result DeviceD3D11::CreateCommittedTexture(MemoryLocation memoryLocation, float priority, const TextureDesc& textureDesc, Texture*& texture) {
+    Result result = CreateImplementation<TextureD3D11>(texture, textureDesc);
+
+    if (result == Result::SUCCESS)
+        result = ((TextureD3D11*)texture)->Allocate(memoryLocation, priority);
+
+    if (result != Result::SUCCESS) {
+        Destroy((TextureD3D11*)texture);
+        texture = nullptr;
+    }
+
+    return result;
+}
+
+NRI_INLINE Result DeviceD3D11::CreatePlacedBuffer(Memory* memory, uint64_t offset, const BufferDesc& bufferDesc, Buffer*& buffer) {
+    MemoryLocation memoryLocation = (MemoryLocation)offset;
+    float priority = 0.0f;
+
+    if (memory) {
+        memoryLocation = ((MemoryD3D11*)memory)->GetLocation();
+        priority = ((MemoryD3D11*)memory)->GetPriority();
+    }
+
+    return CreateCommittedBuffer(memoryLocation, priority, bufferDesc, buffer);
+}
+
+NRI_INLINE Result DeviceD3D11::CreatePlacedTexture(Memory* memory, uint64_t offset, const TextureDesc& textureDesc, Texture*& texture) {
+    MemoryLocation memoryLocation = (MemoryLocation)offset;
+    float priority = 0.0f;
+
+    if (memory) {
+        memoryLocation = ((MemoryD3D11*)memory)->GetLocation();
+        priority = ((MemoryD3D11*)memory)->GetPriority();
+    }
+
+    return CreateCommittedTexture(memoryLocation, priority, textureDesc, texture);
 }
 
 NRI_INLINE Result DeviceD3D11::GetQueue(QueueType queueType, uint32_t queueIndex, Queue*& queue) {

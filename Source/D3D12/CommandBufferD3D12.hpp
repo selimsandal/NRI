@@ -3,6 +3,8 @@
 static uint8_t QueryLatestInterface(ComPtr<ID3D12GraphicsCommandList>& in, ComPtr<ID3D12GraphicsCommandListBest>& out) {
     static const IID versions[] = {
 #if NRI_ENABLE_AGILITY_SDK_SUPPORT
+        __uuidof(ID3D12GraphicsCommandList12),
+        __uuidof(ID3D12GraphicsCommandList11),
         __uuidof(ID3D12GraphicsCommandList10),
         __uuidof(ID3D12GraphicsCommandList9),
         __uuidof(ID3D12GraphicsCommandList8),
@@ -34,6 +36,7 @@ static uint8_t QueryLatestInterface(ComPtr<ID3D12GraphicsCommandList>& in, ComPt
 static uint8_t QueryLatestInterface(ComPtr<ID3D12VideoDecodeCommandList>& in, ComPtr<ID3D12VideoDecodeCommandListBest>& out) {
     static const IID versions[] = {
 #if NRI_ENABLE_AGILITY_SDK_SUPPORT
+        __uuidof(ID3D12VideoDecodeCommandList4),
         __uuidof(ID3D12VideoDecodeCommandList3),
 #endif
         // D3D12 Ultimate initial release
@@ -58,6 +61,7 @@ static uint8_t QueryLatestInterface(ComPtr<ID3D12VideoDecodeCommandList>& in, Co
 static uint8_t QueryLatestInterface(ComPtr<ID3D12VideoEncodeCommandList>& in, ComPtr<ID3D12VideoEncodeCommandListBest>& out) {
     static const IID versions[] = {
 #if NRI_ENABLE_AGILITY_SDK_SUPPORT
+        __uuidof(ID3D12VideoEncodeCommandList5),
         __uuidof(ID3D12VideoEncodeCommandList4),
         __uuidof(ID3D12VideoEncodeCommandList3),
         __uuidof(ID3D12VideoEncodeCommandList2),
@@ -78,6 +82,43 @@ static uint8_t QueryLatestInterface(ComPtr<ID3D12VideoEncodeCommandList>& in, Co
     NRI_CHECK(n > i, "Unexpected");
 
     return n - i - 1;
+}
+
+// Attachment resolves run between internal transitions. Their public states describe the attachment
+// states surrounding those transitions, rather than a combination of attachment and native resolve states.
+static inline AccessLayoutStage GetResolveAttachmentState(AccessLayoutStage state, Format format, PlaneBits planes, bool shaderResource) {
+    if (!(state.access & RESOLVE_ATTACHMENT_ACCESS))
+        return state;
+
+    StageBits stages = state.stages;
+    const FormatProps& formatProps = GetFormatProps(format);
+    bool isDepthStencil = formatProps.isDepth || formatProps.isStencil;
+    bool isReadOnly = (planes & PlaneBits::STENCIL) ? IsStencilReadOnly(state.layout) : IsDepthReadOnly(state.layout);
+
+    if (!isDepthStencil) {
+        state.access = AccessBits::COLOR_ATTACHMENT;
+        state.stages = StageBits::COLOR_ATTACHMENT;
+    } else if (isReadOnly) {
+        // Canonical read-only resolve sources also permit shader reads when the resource supports them.
+        // This lets internal transitions restore the same state without tracking individual shader uses.
+        state.access = AccessBits::DEPTH_STENCIL_ATTACHMENT_READ;
+        state.layout = Layout::DEPTH_STENCIL_READONLY;
+        if (shaderResource)
+            state.access |= AccessBits::SHADER_RESOURCE;
+        state.stages = StageBits::DEPTH_STENCIL_ATTACHMENT;
+        if (shaderResource)
+            state.stages |= StageBits::ALL_SHADERS;
+    } else {
+        state.access = AccessBits::DEPTH_STENCIL_ATTACHMENT;
+        state.layout = Layout::DEPTH_STENCIL_ATTACHMENT;
+        state.stages = StageBits::DEPTH_STENCIL_ATTACHMENT;
+    }
+
+    // Widen execution scopes containing stages incompatible with the canonical native attachment access.
+    if (stages == StageBits::ALL || (stages & ~(state.stages | StageBits::RESOLVE_ATTACHMENT)))
+        state.stages = StageBits::ALL;
+
+    return state;
 }
 
 #if NRI_ENABLE_AGILITY_SDK_SUPPORT
@@ -119,7 +160,7 @@ static inline D3D12_BARRIER_SYNC GetBarrierSyncFlags(StageBits stageBits, Access
     if (stageBits & StageBits::COPY)
         flags |= D3D12_BARRIER_SYNC_COPY;
 
-    if (stageBits & StageBits::RESOLVE)
+    if (stageBits & (StageBits::RESOLVE | StageBits::RESOLVE_ATTACHMENT))
         flags |= D3D12_BARRIER_SYNC_RESOLVE;
 
     if (stageBits & StageBits::CLEAR_STORAGE)
@@ -139,9 +180,22 @@ static inline D3D12_BARRIER_SYNC GetBarrierSyncFlags(StageBits stageBits, Access
 
         // There is no "EMIT_POSTBUILD_INFO" flag in VK, moreover "VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR" already includes "ACCELERATION_STRUCTURE_COPY".
         // "EMIT_POSTBUILD_INFO" can't be set if "write" access is expected.
-        if (!(accessBits & AccessBits::ACCELERATION_STRUCTURE_WRITE))
+        if (!(accessBits & (AccessBits::ACCELERATION_STRUCTURE_WRITE | AccessBits::MICROMAP_WRITE)))
             flags |= D3D12_BARRIER_SYNC_EMIT_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO;
     }
+
+    return flags;
+}
+
+static inline D3D12_BARRIER_SYNC GetGlobalBarrierSyncFlags(StageBits stageBits, AccessBits accessBits) {
+    D3D12_BARRIER_SYNC flags = GetBarrierSyncFlags(stageBits, accessBits);
+    if (stageBits == StageBits::ALL || stageBits == StageBits::NONE || accessBits == AccessBits::NONE)
+        return flags;
+
+    // Resolve and incompatible access scopes cannot share the native sync mask. Widen only global barriers.
+    constexpr AccessBits resolveAccess = AccessBits::RESOLVE_SOURCE | AccessBits::RESOLVE_DESTINATION | RESOLVE_ATTACHMENT_ACCESS;
+    if ((stageBits & StageBits::ALL_RESOLVE) && ((stageBits & ~StageBits::ALL_RESOLVE) || (accessBits & ~resolveAccess)))
+        return D3D12_BARRIER_SYNC_ALL;
 
     return flags;
 }
@@ -196,10 +250,10 @@ static inline D3D12_BARRIER_ACCESS GetBarrierAccessFlags(AccessBits accessBits) 
     if (accessBits & (AccessBits::COPY_DESTINATION | AccessBits::HOST_WRITE))
         flags |= D3D12_BARRIER_ACCESS_COPY_DEST;
 
-    if (accessBits & AccessBits::RESOLVE_SOURCE)
+    if (accessBits & (AccessBits::RESOLVE_SOURCE | AccessBits::RESOLVE_ATTACHMENT_SOURCE))
         flags |= D3D12_BARRIER_ACCESS_RESOLVE_SOURCE;
 
-    if (accessBits & AccessBits::RESOLVE_DESTINATION)
+    if (accessBits & (AccessBits::RESOLVE_DESTINATION | AccessBits::RESOLVE_ATTACHMENT_DESTINATION))
         flags |= D3D12_BARRIER_ACCESS_RESOLVE_DEST;
 
     if (accessBits & AccessBits::VIDEO_DECODE_READ)
@@ -215,6 +269,14 @@ static inline D3D12_BARRIER_ACCESS GetBarrierAccessFlags(AccessBits accessBits) 
         flags |= D3D12_BARRIER_ACCESS_VIDEO_ENCODE_WRITE;
 
     return flags;
+}
+
+static inline D3D12_BARRIER_ACCESS GetTextureBarrierAccessFlags(const AccessLayoutStage& state) {
+    // "NO_ACCESS" requires "SYNC_NONE" for defined layouts, preserve execution dependencies by using conservative access instead
+    if (state.access == AccessBits::NONE && state.layout != Layout::UNDEFINED && state.stages != StageBits::NONE)
+        return D3D12_BARRIER_ACCESS_COMMON;
+
+    return GetBarrierAccessFlags(state.access);
 }
 
 constexpr std::array<D3D12_BARRIER_LAYOUT, (size_t)Layout::MAX_NUM> g_BarrierLayouts = {
@@ -241,7 +303,15 @@ constexpr std::array<D3D12_BARRIER_LAYOUT, (size_t)Layout::MAX_NUM> g_BarrierLay
 };
 NRI_VALIDATE_ARRAY(g_BarrierLayouts);
 
-static constexpr D3D12_BARRIER_LAYOUT GetBarrierLayout(Layout layout, AccessBits accessBits) {
+static inline bool IsCopyQueue(const Queue* queue) {
+    return queue && queue != EXTERNAL_QUEUE && ((const QueueD3D12*)queue)->GetType() == D3D12_COMMAND_LIST_TYPE_COPY;
+}
+
+static inline D3D12_BARRIER_LAYOUT GetBarrierLayout(Layout layout, AccessBits accessBits, bool isCopyQueue) {
+    // COPY queues use COMMON for both copy layouts, including the matching side of a queue hand-off.
+    if (isCopyQueue && (layout == Layout::COPY_SOURCE || layout == Layout::COPY_DESTINATION))
+        return D3D12_BARRIER_LAYOUT_COMMON;
+
     // Special case
     if (layout == Layout::INPUT_ATTACHMENT && (accessBits & AccessBits::INPUT_ATTACHMENT) != 0)
         return D3D12_BARRIER_LAYOUT_SHADER_RESOURCE;
@@ -374,6 +444,14 @@ static inline bool HasVideoBufferUsage(BufferUsageBits usage) {
     return usage & (BufferUsageBits::VIDEO_DECODE | BufferUsageBits::VIDEO_ENCODE);
 }
 
+static inline uint32_t GetLegacyBarrierPlaneNum(Format format, PlaneBits planes) {
+    // Multi-planar YUV: "ALL", "COLOR" or "PLANE_0 | PLANE_1" requires a transition per plane subresource
+    const bool isMultiPlanar = format == Format::NV12_UNORM || format == Format::P010_UNORM || format == Format::P016_UNORM;
+    const bool isAllPlanes = planes == PlaneBits::ALL || (planes & PlaneBits::COLOR) || ((planes & PlaneBits::PLANE_0) && (planes & PlaneBits::PLANE_1));
+
+    return (isMultiPlanar && isAllPlanes) ? 2 : 1;
+}
+
 static inline void ConvertRects(const Rect* in, uint32_t rectNum, D3D12_RECT* out) {
     for (uint32_t i = 0; i < rectNum; i++) {
         out[i].left = in[i].x;
@@ -385,30 +463,34 @@ static inline void ConvertRects(const Rect* in, uint32_t rectNum, D3D12_RECT* ou
 
 #if NRI_ENABLE_AGILITY_SDK_SUPPORT
 static inline void FillResolveBarrier(bool isSource, DescriptorD3D12& descriptor, PlaneBits planeBits, D3D12_TEXTURE_BARRIER& textureBarrier) {
-    const TexViewDesc& srcDesc = descriptor.GetTexViewDesc();
+    const TexViewDesc& viewDesc = descriptor.GetTexViewDesc();
 
     textureBarrier = {};
-    textureBarrier.SyncBefore = D3D12_BARRIER_SYNC_RENDER_TARGET;
+    AccessLayoutStage state = {isSource ? AccessBits::RESOLVE_ATTACHMENT_SOURCE : AccessBits::RESOLVE_ATTACHMENT_DESTINATION, viewDesc.layout, StageBits::ALL};
+    state = GetResolveAttachmentState(state, descriptor.GetFormat(), planeBits, !(descriptor.GetResource()->GetDesc().Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE));
+    textureBarrier.SyncBefore = GetBarrierSyncFlags(state.stages, state.access);
     textureBarrier.SyncAfter = D3D12_BARRIER_SYNC_RESOLVE;
-    textureBarrier.AccessBefore = D3D12_BARRIER_ACCESS_RENDER_TARGET;
+    textureBarrier.AccessBefore = GetBarrierAccessFlags(state.access);
     textureBarrier.AccessAfter = isSource ? D3D12_BARRIER_ACCESS_RESOLVE_SOURCE : D3D12_BARRIER_ACCESS_RESOLVE_DEST;
-    textureBarrier.LayoutBefore = D3D12_BARRIER_LAYOUT_RENDER_TARGET;
+    textureBarrier.LayoutBefore = GetBarrierLayout(state.layout, state.access, false);
     textureBarrier.LayoutAfter = isSource ? D3D12_BARRIER_LAYOUT_RESOLVE_SOURCE : D3D12_BARRIER_LAYOUT_RESOLVE_DEST;
     textureBarrier.pResource = descriptor.GetResource();
-    textureBarrier.Subresources.IndexOrFirstMipLevel = srcDesc.mipOffset;
+    textureBarrier.Subresources.IndexOrFirstMipLevel = viewDesc.mipOffset;
     textureBarrier.Subresources.NumMipLevels = 1;
-    textureBarrier.Subresources.FirstArraySlice = srcDesc.layerOffset;
-    textureBarrier.Subresources.NumArraySlices = srcDesc.layerNum;
+    textureBarrier.Subresources.FirstArraySlice = viewDesc.layerOffset;
+    textureBarrier.Subresources.NumArraySlices = viewDesc.layerNum;
     textureBarrier.Subresources.NumPlanes = 1; // TODO: can be optimized for depth-stencil resolve
     textureBarrier.Subresources.FirstPlane = (planeBits & PlaneBits::STENCIL) ? 1 : 0;
 }
 #endif
 
-static inline void FillLegacyResolveBarrier(bool isSource, DescriptorD3D12& descriptor, uint32_t subresource, D3D12_RESOURCE_BARRIER& resourceBarrier) {
+static inline void FillLegacyResolveBarrier(bool isSource, DescriptorD3D12& descriptor, PlaneBits planeBits, uint32_t subresource, D3D12_RESOURCE_BARRIER& resourceBarrier) {
     resourceBarrier = {};
     resourceBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     resourceBarrier.Transition.pResource = descriptor.GetResource();
-    resourceBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    AccessLayoutStage state = {isSource ? AccessBits::RESOLVE_ATTACHMENT_SOURCE : AccessBits::RESOLVE_ATTACHMENT_DESTINATION, descriptor.GetTexViewDesc().layout, StageBits::ALL};
+    state = GetResolveAttachmentState(state, descriptor.GetFormat(), planeBits, !(descriptor.GetResource()->GetDesc().Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE));
+    resourceBarrier.Transition.StateBefore = GetResourceStates(state.access, D3D12_COMMAND_LIST_TYPE_DIRECT);
     resourceBarrier.Transition.StateAfter = isSource ? D3D12_RESOURCE_STATE_RESOLVE_SOURCE : D3D12_RESOURCE_STATE_RESOLVE_DEST;
     resourceBarrier.Transition.Subresource = subresource;
 }
@@ -425,8 +507,53 @@ static constexpr D3D12_RESOLVE_MODE GetResolveOp(ResolveOp resolveOp) {
     return g_ResolveOps[(size_t)resolveOp];
 }
 
+static inline DXGI_FORMAT GetPlaneCompatibleFormat(Format format, PlaneBits planes) {
+    // Depth/stencil buffer footprints use a single-plane format.
+    if (format == Format::D24_UNORM_S8_UINT || format == Format::D32_SFLOAT_S8_UINT)
+        return (planes & PlaneBits::STENCIL) ? DXGI_FORMAT_R8_TYPELESS : DXGI_FORMAT_R32_TYPELESS;
+
+    if (format == Format::NV12_UNORM) {
+        if (planes & PlaneBits::PLANE_0)
+            return DXGI_FORMAT_R8_UNORM;
+        if (planes & PlaneBits::PLANE_1)
+            return DXGI_FORMAT_R8G8_UNORM;
+    } else if (format == Format::P010_UNORM || format == Format::P016_UNORM) {
+        if (planes & PlaneBits::PLANE_0)
+            return DXGI_FORMAT_R16_UNORM;
+        if (planes & PlaneBits::PLANE_1)
+            return DXGI_FORMAT_R16G16_UNORM;
+    }
+
+    return GetDxgiFormat(format).typeless;
+}
+
+static inline uint32_t GetPlaneDivisor(Format format, PlaneBits planes) {
+    return ((planes & PlaneBits::PLANE_1) && (format == Format::NV12_UNORM || format == Format::P010_UNORM || format == Format::P016_UNORM)) ? 2u : 1u;
+}
+
 static inline uint8_t GetVideoDecodeAV1FrameType(VideoFrameType frameType) {
     return (frameType == VideoFrameType::IDR || frameType == VideoFrameType::I) ? 0 : 1;
+}
+
+static inline void FillVideoDecodeAV1TileSizes(uint32_t miNum, uint32_t sbShift, uint32_t tileNum, const uint16_t* sizesInSuperblocksMinus1, const uint16_t* miStarts, USHORT* sizes) {
+    if (sizesInSuperblocksMinus1) {
+        for (uint32_t i = 0; i < tileNum; i++)
+            sizes[i] = (USHORT)(sizesInSuperblocksMinus1[i] + 1);
+    } else if (miStarts) {
+        for (uint32_t i = 0; i < tileNum; i++)
+            sizes[i] = (USHORT)((miStarts[i + 1] - miStarts[i] + (1u << sbShift) - 1) >> sbShift);
+    } else {
+        // Uniform spacing (AV1 "tile_info"): "tileLog2 = tile_log2(1, tileNum)", all tiles but the last one have the same size
+        const uint32_t sbNum = (miNum + (1u << sbShift) - 1) >> sbShift;
+
+        const uint32_t tileLog2 = video::av1::TileLog2(1, tileNum);
+        const uint32_t tileSizeInSuperblocks = (sbNum + (1u << tileLog2) - 1) >> tileLog2;
+
+        for (uint32_t i = 0; i < tileNum; i++) {
+            const uint32_t start = i * tileSizeInSuperblocks;
+            sizes[i] = (USHORT)(start < sbNum ? std::min(tileSizeInSuperblocks, sbNum - start) : 0);
+        }
+    }
 }
 
 static inline bool GetVideoDecodeReferenceSlotCount(const VideoReference* references, uint32_t referenceNum, uint32_t& slotCount) {
@@ -514,6 +641,9 @@ static bool BuildVideoDecodeH264Arguments(const VideoH264SessionParametersDesc& 
         pictureParameters.FieldOrderCntList[i][0] = reference.topFieldOrderCount;
         pictureParameters.FieldOrderCntList[i][1] = reference.bottomFieldOrderCount;
         pictureParameters.FrameNumList[i] = (USHORT)reference.frameNum;
+
+        if ((reference.flags & (VideoH264DecodeReferenceBits::TOP_FIELD | VideoH264DecodeReferenceBits::BOTTOM_FIELD)) == 0) // frame reference
+            pictureParameters.UsedForReferenceFlags |= 3u << (i * 2);
         if (reference.flags & VideoH264DecodeReferenceBits::TOP_FIELD)
             pictureParameters.UsedForReferenceFlags |= 1u << (i * 2);
         if (reference.flags & VideoH264DecodeReferenceBits::BOTTOM_FIELD)
@@ -563,7 +693,15 @@ static bool BuildVideoDecodeH264Arguments(const VideoH264SessionParametersDesc& 
     return true;
 }
 
-static inline void FillVideoH265ScalingLists(DXVA_Qmatrix_HEVC& matrix, const VideoH265ScalingListsDesc* scalingLists) {
+static inline void FillVideoH265ScalingLists(DXVA_Qmatrix_HEVC& matrix, const VideoH265ScalingListsDesc* scalingLists, bool isScalingListEnabled) {
+    // H.265 Table 7-6: default 8x8 (and up-sampled 16x16, 32x32) lists in coded (up-right diagonal) order
+    constexpr uint8_t defaultIntra[64] = {
+        16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 17, 16, 17, 16, 17, 18, 17, 18, 18, 17, 18, 21, 19, 20, 21, 20, 19, 21, 24, 22, 22, 24,
+        24, 22, 22, 24, 25, 25, 27, 30, 27, 25, 25, 29, 31, 35, 35, 31, 29, 36, 41, 44, 41, 36, 47, 54, 54, 47, 65, 70, 65, 88, 88, 115};
+    constexpr uint8_t defaultInter[64] = {
+        16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 17, 17, 17, 17, 17, 18, 18, 18, 18, 18, 18, 20, 20, 20, 20, 20, 20, 20, 24, 24, 24, 24,
+        24, 24, 24, 24, 25, 25, 25, 25, 25, 25, 25, 28, 28, 28, 28, 28, 28, 33, 33, 33, 33, 33, 41, 41, 41, 41, 54, 54, 54, 71, 71, 91};
+
     matrix = {};
     if (scalingLists) {
         std::memcpy(matrix.ucScalingLists0, scalingLists->scalingList4x4, sizeof(matrix.ucScalingLists0));
@@ -582,6 +720,18 @@ static inline void FillVideoH265ScalingLists(DXVA_Qmatrix_HEVC& matrix, const Vi
     std::memset(matrix.ucScalingLists3, 16, sizeof(matrix.ucScalingLists3));
     std::memset(matrix.ucScalingListDCCoefSizeID2, 16, sizeof(matrix.ucScalingListDCCoefSizeID2));
     std::memset(matrix.ucScalingListDCCoefSizeID3, 16, sizeof(matrix.ucScalingListDCCoefSizeID3));
+
+    // "scaling_list_enabled_flag" without explicit lists: spec default lists (matrixId 0-2 intra, 3-5 inter)
+    if (isScalingListEnabled) {
+        for (uint32_t i = 0; i < 6; i++) {
+            const uint8_t* defaultList = i < 3 ? defaultIntra : defaultInter;
+            std::memcpy(matrix.ucScalingLists1[i], defaultList, sizeof(matrix.ucScalingLists1[i]));
+            std::memcpy(matrix.ucScalingLists2[i], defaultList, sizeof(matrix.ucScalingLists2[i]));
+        }
+
+        std::memcpy(matrix.ucScalingLists3[0], defaultIntra, sizeof(matrix.ucScalingLists3[0]));
+        std::memcpy(matrix.ucScalingLists3[1], defaultInter, sizeof(matrix.ucScalingLists3[1]));
+    }
 }
 
 static bool BuildVideoDecodeH265Arguments(const VideoH265SessionParametersDesc& parameters, const VideoH265DecodePictureDesc& pictureDesc, uint64_t bitstreamSize,
@@ -715,7 +865,12 @@ static bool BuildVideoDecodeH265Arguments(const VideoH265SessionParametersDesc& 
             return false;
     }
 
-    FillVideoH265ScalingLists(inverseQuantizationMatrix, pps->scalingLists ? pps->scalingLists : sps->scalingLists);
+    // "RefPicSetStCurrBefore" in descending and "RefPicSetStCurrAfter" in ascending POC order (H.265 8.3.2)
+    const INT* poc = pictureParameters.PicOrderCntValList;
+    std::sort(pictureParameters.RefPicSetStCurrBefore, pictureParameters.RefPicSetStCurrBefore + beforeNum, [poc](UCHAR a, UCHAR b) { return poc[a] > poc[b]; });
+    std::sort(pictureParameters.RefPicSetStCurrAfter, pictureParameters.RefPicSetStCurrAfter + afterNum, [poc](UCHAR a, UCHAR b) { return poc[a] < poc[b]; });
+
+    FillVideoH265ScalingLists(inverseQuantizationMatrix, pps->scalingLists ? pps->scalingLists : sps->scalingLists, pictureParameters.scaling_list_enabled_flag);
 
     for (uint32_t i = 0; i < sliceNum; i++) {
         const uint32_t offset = pictureDesc.sliceSegmentOffsets[i];
@@ -736,6 +891,30 @@ static bool BuildVideoDecodeH265Arguments(const VideoH265SessionParametersDesc& 
 }
 
 #if NRI_ENABLE_AGILITY_SDK_SUPPORT
+// Also used to rebuild the frame header from metadata ("GetVideoAV1EncodeDecodeInfo")
+static inline D3D12_VIDEO_ENCODER_AV1_PICTURE_CONTROL_FLAGS GetVideoEncodeAV1PictureControlFlags(VideoAV1PictureBits pictureFlags, uint32_t featureFlags, uint32_t requiredFeatureFlags) {
+    D3D12_VIDEO_ENCODER_AV1_PICTURE_CONTROL_FLAGS flags = D3D12_VIDEO_ENCODER_AV1_PICTURE_CONTROL_FLAG_NONE;
+
+    if (pictureFlags & VideoAV1PictureBits::ERROR_RESILIENT_MODE)
+        flags |= D3D12_VIDEO_ENCODER_AV1_PICTURE_CONTROL_FLAG_ENABLE_ERROR_RESILIENT_MODE;
+
+    if (((featureFlags & D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_FORCED_INTEGER_MOTION_VECTORS) && (pictureFlags & VideoAV1PictureBits::FORCE_INTEGER_MV)) || (requiredFeatureFlags & D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_FORCED_INTEGER_MOTION_VECTORS))
+        flags |= D3D12_VIDEO_ENCODER_AV1_PICTURE_CONTROL_FLAG_FORCE_INTEGER_MOTION_VECTORS;
+
+    if (((featureFlags & D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_AUTO_SEGMENTATION) && (pictureFlags & VideoAV1PictureBits::SEGMENTATION_ENABLED)) || (requiredFeatureFlags & D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_AUTO_SEGMENTATION))
+        flags |= D3D12_VIDEO_ENCODER_AV1_PICTURE_CONTROL_FLAG_ENABLE_FRAME_SEGMENTATION_AUTO;
+
+    return flags;
+}
+
+// "txMode = 0" selects the default
+static inline uint8_t GetVideoEncodeAV1TxMode(const VideoAV1EncodePictureDesc* av1PictureDesc, VideoFrameType frameType) {
+    if (av1PictureDesc && av1PictureDesc->txMode)
+        return av1PictureDesc->txMode;
+
+    return frameType == VideoFrameType::P ? video::av1::TX_MODE_SELECT : video::av1::TX_MODE_LARGEST;
+}
+
 static inline D3D12_VIDEO_ENCODER_AV1_FRAME_TYPE GetVideoEncodeAV1FrameType(VideoFrameType frameType) {
     switch (frameType) {
         case VideoFrameType::IDR:
@@ -747,6 +926,87 @@ static inline D3D12_VIDEO_ENCODER_AV1_FRAME_TYPE GetVideoEncodeAV1FrameType(Vide
         default:
             return (D3D12_VIDEO_ENCODER_AV1_FRAME_TYPE)-1;
     }
+}
+
+static inline void EncodeVideoFrame(ID3D12VideoEncodeCommandListBest* commandList, uint8_t version, ID3D12VideoEncoder* encoder, ID3D12VideoEncoderHeap1* heap, VideoCodec codec,
+    const D3D12_VIDEO_ENCODER_ENCODEFRAME_INPUT_ARGUMENTS1& input, const D3D12_VIDEO_ENCODER_ENCODEFRAME_OUTPUT_ARGUMENTS1& output) {
+    if (version >= 4) {
+        commandList->EncodeFrame1(encoder, heap, &input, &output);
+        return;
+    }
+
+    NRI_CHECK(version >= 2, "Video encoding requires ID3D12VideoEncodeCommandList2");
+
+    D3D12_VIDEO_ENCODER_ENCODEFRAME_INPUT_ARGUMENTS legacyInput = {};
+    legacyInput.SequenceControlDesc = input.SequenceControlDesc;
+    legacyInput.PictureControlDesc.IntraRefreshFrameIndex = input.PictureControlDesc.IntraRefreshFrameIndex;
+    legacyInput.PictureControlDesc.Flags = input.PictureControlDesc.Flags;
+    legacyInput.PictureControlDesc.ReferenceFrames = input.PictureControlDesc.ReferenceFrames;
+    legacyInput.pInputFrame = input.pInputFrame;
+    legacyInput.InputFrameSubresource = input.InputFrameSubresource;
+    legacyInput.CurrentFrameBitstreamMetadataSize = input.CurrentFrameBitstreamMetadataSize;
+
+    const D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA1& codecData = input.PictureControlDesc.PictureControlCodecData;
+    D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA& legacyCodecData = legacyInput.PictureControlDesc.PictureControlCodecData;
+    legacyCodecData.DataSize = codecData.DataSize;
+
+    D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC legacyHevc = {};
+    if (codec == VideoCodec::H264)
+        legacyCodecData.pH264PicData = codecData.pH264PicData;
+    else if (codec == VideoCodec::H265) {
+        const D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC2& hevc = *codecData.pHEVCPicData;
+        legacyHevc.Flags = hevc.Flags;
+        legacyHevc.FrameType = hevc.FrameType;
+        legacyHevc.slice_pic_parameter_set_id = hevc.slice_pic_parameter_set_id;
+        legacyHevc.PictureOrderCountNumber = hevc.PictureOrderCountNumber;
+        legacyHevc.TemporalLayerIndex = hevc.TemporalLayerIndex;
+        legacyHevc.List0ReferenceFramesCount = hevc.List0ReferenceFramesCount;
+        legacyHevc.pList0ReferenceFrames = hevc.pList0ReferenceFrames;
+        legacyHevc.List1ReferenceFramesCount = hevc.List1ReferenceFramesCount;
+        legacyHevc.pList1ReferenceFrames = hevc.pList1ReferenceFrames;
+        legacyHevc.ReferenceFramesReconPictureDescriptorsCount = hevc.ReferenceFramesReconPictureDescriptorsCount;
+        legacyHevc.pReferenceFramesReconPictureDescriptors = hevc.pReferenceFramesReconPictureDescriptors;
+        legacyHevc.List0RefPicModificationsCount = hevc.List0RefPicModificationsCount;
+        legacyHevc.pList0RefPicModifications = hevc.pList0RefPicModifications;
+        legacyHevc.List1RefPicModificationsCount = hevc.List1RefPicModificationsCount;
+        legacyHevc.pList1RefPicModifications = hevc.pList1RefPicModifications;
+        legacyHevc.QPMapValuesCount = hevc.QPMapValuesCount;
+        legacyHevc.pRateControlQPMap = hevc.pRateControlQPMap;
+
+        // The legacy API derives active reference counts from the list lengths, as NRI does for HEVC2.
+        legacyCodecData.DataSize = sizeof(legacyHevc);
+        legacyCodecData.pHEVCPicData = &legacyHevc;
+    } else
+        legacyCodecData.pAV1PicData = codecData.pAV1PicData;
+
+    D3D12_VIDEO_ENCODER_ENCODEFRAME_OUTPUT_ARGUMENTS legacyOutput = {};
+    legacyOutput.Bitstream = output.Bitstream.FrameOutputBuffer;
+    legacyOutput.ReconstructedPicture = output.ReconstructedPicture;
+    legacyOutput.EncoderOutputMetadata = output.EncoderOutputMetadata;
+
+    commandList->EncodeFrame(encoder, heap, &legacyInput, &legacyOutput);
+}
+
+static inline void ResolveVideoEncoderOutputMetadata(ID3D12VideoEncodeCommandListBest* commandList, uint8_t version,
+    const D3D12_VIDEO_ENCODER_RESOLVE_METADATA_INPUT_ARGUMENTS1& input, const D3D12_VIDEO_ENCODER_RESOLVE_METADATA_OUTPUT_ARGUMENTS1& output) {
+    if (version >= 4) {
+        commandList->ResolveEncoderOutputMetadata1(&input, &output);
+        return;
+    }
+
+    NRI_CHECK(version >= 2, "Video metadata resolve requires ID3D12VideoEncodeCommandList2");
+
+    D3D12_VIDEO_ENCODER_RESOLVE_METADATA_INPUT_ARGUMENTS legacyInput = {};
+    legacyInput.EncoderCodec = input.EncoderCodec;
+    legacyInput.EncoderProfile = input.EncoderProfile;
+    legacyInput.EncoderInputFormat = input.EncoderInputFormat;
+    legacyInput.EncodedPictureEffectiveResolution = input.EncodedPictureEffectiveResolution;
+    legacyInput.HWLayoutMetadata = input.HWLayoutMetadata;
+
+    D3D12_VIDEO_ENCODER_RESOLVE_METADATA_OUTPUT_ARGUMENTS legacyOutput = {};
+    legacyOutput.ResolvedLayoutMetadata = output.ResolvedLayoutMetadata;
+
+    commandList->ResolveEncoderOutputMetadata(&legacyInput, &legacyOutput);
 }
 
 static_assert(offsetof(VideoEncodeFeedback, errorFlags) == offsetof(D3D12_VIDEO_ENCODER_OUTPUT_METADATA, EncodeErrorFlags));
@@ -960,24 +1220,23 @@ NRI_INLINE void CommandBufferD3D12::DecodeVideo(const VideoDecodeDesc& videoDeco
         av1PictureParameters.superres_denom = desc.superresDenom ? desc.superresDenom : 8;
         av1PictureParameters.bitdepth = sequence.bitDepth;
         av1PictureParameters.seq_profile = sequence.seqProfile;
-        av1PictureParameters.tiles.cols = 1;
-        av1PictureParameters.tiles.rows = 1;
-        av1PictureParameters.tiles.widths[0] = (USHORT)((sessionDesc.width + 63) / 64);
-        av1PictureParameters.tiles.heights[0] = (USHORT)((sessionDesc.height + 63) / 64);
-        if (desc.tileLayout) {
-            av1PictureParameters.tiles.cols = desc.tileLayout->columnNum;
-            av1PictureParameters.tiles.rows = desc.tileLayout->rowNum;
-            av1PictureParameters.tiles.context_update_id = desc.tileLayout->contextUpdateTileId;
-            for (uint32_t i = 0; i < desc.tileLayout->columnNum; i++)
-                av1PictureParameters.tiles.widths[i] = desc.tileLayout->widthInSuperblocksMinus1[i] + 1;
-            for (uint32_t i = 0; i < desc.tileLayout->rowNum; i++)
-                av1PictureParameters.tiles.heights[i] = desc.tileLayout->heightInSuperblocksMinus1[i] + 1;
-        }
+
+        const uint32_t miCols = 2 * ((sessionDesc.width + 7) >> 3);
+        const uint32_t miRows = 2 * ((sessionDesc.height + 7) >> 3);
+        const uint32_t sbShift = (sequence.flags & VideoAV1SequenceBits::USE_128X128_SUPERBLOCK) ? 5 : 4;
+        const VideoAV1TileLayoutDesc singleTileLayout = {1, 1};
+        const VideoAV1TileLayoutDesc& tileLayout = desc.tileLayout ? *desc.tileLayout : singleTileLayout;
+        av1PictureParameters.tiles.cols = tileLayout.columnNum;
+        av1PictureParameters.tiles.rows = tileLayout.rowNum;
+        av1PictureParameters.tiles.context_update_id = tileLayout.contextUpdateTileId;
+        FillVideoDecodeAV1TileSizes(miCols, sbShift, tileLayout.columnNum, tileLayout.widthInSuperblocksMinus1, tileLayout.miColumnStarts, av1PictureParameters.tiles.widths);
+        FillVideoDecodeAV1TileSizes(miRows, sbShift, tileLayout.rowNum, tileLayout.heightInSuperblocksMinus1, tileLayout.miRowStarts, av1PictureParameters.tiles.heights);
         av1PictureParameters.coding.use_128x128_superblock = !!(sequence.flags & VideoAV1SequenceBits::USE_128X128_SUPERBLOCK);
+        av1PictureParameters.coding.filter_intra = !!(sequence.flags & VideoAV1SequenceBits::ENABLE_FILTER_INTRA);
         av1PictureParameters.coding.intra_edge_filter = !!(sequence.flags & VideoAV1SequenceBits::ENABLE_INTRA_EDGE_FILTER);
         av1PictureParameters.coding.interintra_compound = !!(sequence.flags & VideoAV1SequenceBits::ENABLE_INTERINTRA_COMPOUND);
         av1PictureParameters.coding.masked_compound = !!(sequence.flags & VideoAV1SequenceBits::ENABLE_MASKED_COMPOUND);
-        av1PictureParameters.coding.warped_motion = !!(sequence.flags & VideoAV1SequenceBits::ENABLE_WARPED_MOTION);
+        av1PictureParameters.coding.warped_motion = !!(pictureFlags & VideoAV1PictureBits::ALLOW_WARPED_MOTION);
         av1PictureParameters.coding.dual_filter = !!(sequence.flags & VideoAV1SequenceBits::ENABLE_DUAL_FILTER);
         av1PictureParameters.coding.jnt_comp = !!(sequence.flags & VideoAV1SequenceBits::ENABLE_JNT_COMP);
         av1PictureParameters.coding.enable_ref_frame_mvs = !!(sequence.flags & VideoAV1SequenceBits::ENABLE_REF_FRAME_MVS);
@@ -995,7 +1254,7 @@ NRI_INLINE void CommandBufferD3D12::DecodeVideo(const VideoDecodeDesc& videoDeco
         av1PictureParameters.coding.skip_mode = !!(pictureFlags & VideoAV1PictureBits::SKIP_MODE_PRESENT);
         av1PictureParameters.coding.reduced_tx_set = !!(pictureFlags & VideoAV1PictureBits::REDUCED_TX_SET);
         av1PictureParameters.coding.superres = !!(pictureFlags & VideoAV1PictureBits::USE_SUPERRES);
-        av1PictureParameters.coding.tx_mode = desc.txMode ? desc.txMode : 2;
+        av1PictureParameters.coding.tx_mode = desc.txMode;
         av1PictureParameters.coding.use_ref_frame_mvs = !!(pictureFlags & VideoAV1PictureBits::USE_REF_FRAME_MVS);
         av1PictureParameters.coding.reference_frame_update = desc.refreshFrameFlags != 0;
         av1PictureParameters.format.frame_type = GetVideoDecodeAV1FrameType(desc.frameType);
@@ -1006,7 +1265,7 @@ NRI_INLINE void CommandBufferD3D12::DecodeVideo(const VideoDecodeDesc& videoDeco
         av1PictureParameters.format.mono_chrome = !!(sequence.flags & VideoAV1SequenceBits::MONO_CHROME);
         av1PictureParameters.primary_ref_frame = (UCHAR)video::av1::GetReferenceNameIndex(desc.primaryReferenceName);
         av1PictureParameters.order_hint = desc.orderHint;
-        av1PictureParameters.order_hint_bits = (UCHAR)(sequence.orderHintBitsMinus1 + 1);
+        av1PictureParameters.order_hint_bits = (sequence.flags & VideoAV1SequenceBits::ENABLE_ORDER_HINT) ? (UCHAR)(sequence.orderHintBitsMinus1 + 1) : 0;
         std::memset(av1PictureParameters.RefFrameMapTextureIndex, 0xFF, sizeof(av1PictureParameters.RefFrameMapTextureIndex));
         for (uint32_t i = 0; i < video::av1::REFERENCE_NAME_NUM; i++)
             av1PictureParameters.frame_refs[i].Index = 0xFF;
@@ -1053,7 +1312,7 @@ NRI_INLINE void CommandBufferD3D12::DecodeVideo(const VideoDecodeDesc& videoDeco
                 av1PictureParameters.cdef.uv_strengths[i].secondary = desc.cdef->uvSecondaryStrength[i];
             }
         }
-        av1PictureParameters.interp_filter = desc.interpolationFilter ? desc.interpolationFilter : 4;
+        av1PictureParameters.interp_filter = desc.interpolationFilter;
         av1PictureParameters.loop_filter.delta_lf_present = !!(pictureFlags & VideoAV1PictureBits::DELTA_LF_PRESENT);
         av1PictureParameters.loop_filter.delta_lf_multi = !!(pictureFlags & VideoAV1PictureBits::DELTA_LF_MULTI);
         av1PictureParameters.loop_filter.delta_lf_res = desc.deltaLfRes;
@@ -1203,12 +1462,23 @@ NRI_INLINE void CommandBufferD3D12::DecodeVideo(const VideoDecodeDesc& videoDeco
     output.pOutputTexture2D = (ID3D12Resource*)dstPicture.GetTexture();
     output.OutputSubresource = dstPicture.GetSubresource();
 
+    // Distinct decode output: the reconstructed picture goes to the setup (DPB) picture, the output gets the same picture without colour conversion
+    if (setupPicture.GetTexture() != dstPicture.GetTexture() || setupPicture.GetSubresource() != dstPicture.GetSubresource()) {
+        const DXGI_COLOR_SPACE_TYPE colorSpace = GetVideoDecodeColorSpace(session.GetDesc().format);
+
+        output.ConversionArguments.Enable = TRUE;
+        output.ConversionArguments.pReferenceTexture2D = (ID3D12Resource*)setupPicture.GetTexture();
+        output.ConversionArguments.ReferenceSubresource = setupPicture.GetSubresource();
+        output.ConversionArguments.OutputColorSpace = colorSpace;
+        output.ConversionArguments.DecodeColorSpace = colorSpace;
+    }
+
     GetVideoDecodeCommandList()->DecodeFrame(session.GetDecoder(), &output, &input);
 }
 
 NRI_INLINE void CommandBufferD3D12::EncodeVideo(const VideoEncodeDesc& videoEncodeDesc) {
 #if NRI_ENABLE_AGILITY_SDK_SUPPORT
-    const VideoSessionD3D12& session = *(VideoSessionD3D12*)videoEncodeDesc.session;
+    VideoSessionD3D12& session = *(VideoSessionD3D12*)videoEncodeDesc.session;
     const VideoSessionDesc& sessionDesc = session.GetDesc();
 
     BufferD3D12& dstBitstream = *(BufferD3D12*)videoEncodeDesc.dstBitstream.buffer;
@@ -1245,7 +1515,7 @@ NRI_INLINE void CommandBufferD3D12::EncodeVideo(const VideoEncodeDesc& videoEnco
         }
     }
 
-    const VideoEncodeRateControlDesc defaultRateControl = {VideoEncodeRateControlMode::CQP, 26, 28, 30, 0, 51, 30, 1, 0, 0, 0, 0, 0};
+    const VideoEncodeRateControlDesc& defaultRateControl = VIDEO_ENCODE_DEFAULT_RATE_CONTROL;
     const VideoEncodeRateControlDesc& rateControlDesc = videoEncodeDesc.rateControlDesc ? *videoEncodeDesc.rateControlDesc : defaultRateControl;
     if ((session.GetRateControlModes() & video::GetEncodeRateControlModeMask(rateControlDesc.mode)) == 0) {
         NRI_REPORT_ERROR(&m_Device, "Unsupported D3D12 video encode rate control mode");
@@ -1253,7 +1523,7 @@ NRI_INLINE void CommandBufferD3D12::EncodeVideo(const VideoEncodeDesc& videoEnco
     }
 
     VideoEncodeRateControlStateD3D12 rateControlState;
-    FillVideoEncodeRateControl(rateControlDesc, rateControlState);
+    FillVideoEncodeRateControl(rateControlDesc, GetVideoEncodeCodec(sessionDesc.codec), (D3D12_VIDEO_ENCODER_SUPPORT_FLAGS)session.GetEncodeSupportFlags(rateControlDesc.mode), rateControlState);
 
     D3D12_VIDEO_ENCODER_SEQUENCE_GOP_STRUCTURE_H264 h264Gop = {};
     h264Gop.GOPLength = sessionDesc.maxReferenceNum ? 60 : 1;
@@ -1262,6 +1532,27 @@ NRI_INLINE void CommandBufferD3D12::EncodeVideo(const VideoEncodeDesc& videoEnco
     D3D12_VIDEO_ENCODER_SEQUENCE_GOP_STRUCTURE_HEVC hevcGop = {};
     hevcGop.GOPLength = sessionDesc.maxReferenceNum ? 60 : 1;
     hevcGop.PPicturePeriod = sessionDesc.maxReferenceNum > 1 ? 2 : 1;
+
+    // The driver writes slice headers: "frame_num" and "pic_order_cnt_lsb" widths and the POC type must match the SPS written by the application
+    const VideoSessionParametersD3D12* encodeParameters = (VideoSessionParametersD3D12*)videoEncodeDesc.parameters;
+    if (encodeParameters && encodeParameters->GetH264Parameters() && sessionDesc.codec == VideoCodec::H264) {
+        const VideoH264SessionParametersDesc& parameters = *encodeParameters->GetH264Parameters();
+        const VideoH264PictureParameterSetDesc* pps = video::FindParameterSet(parameters.pictureParameterSets, parameters.pictureParameterSetNum, &VideoH264PictureParameterSetDesc::pictureParameterSetId,
+            videoEncodeDesc.h264PictureDesc ? videoEncodeDesc.h264PictureDesc->pictureParameterSetId : 0);
+        const VideoH264SequenceParameterSetDesc* sps = pps ? video::FindParameterSet(parameters.sequenceParameterSets, parameters.sequenceParameterSetNum, &VideoH264SequenceParameterSetDesc::sequenceParameterSetId, pps->sequenceParameterSetId) : nullptr;
+        if (sps) {
+            h264Gop.pic_order_cnt_type = sps->pictureOrderCountType;
+            h264Gop.log2_max_frame_num_minus4 = sps->log2MaxFrameNumMinus4;
+            h264Gop.log2_max_pic_order_cnt_lsb_minus4 = sps->log2MaxPictureOrderCountLsbMinus4;
+        }
+    }
+    if (encodeParameters && encodeParameters->GetH265Parameters() && sessionDesc.codec == VideoCodec::H265) {
+        const VideoH265SessionParametersDesc& parameters = *encodeParameters->GetH265Parameters();
+        const VideoH265SequenceParameterSetDesc* sps = video::FindParameterSet(parameters.sequenceParameterSets, parameters.sequenceParameterSetNum, &VideoH265SequenceParameterSetDesc::sequenceParameterSetId,
+            videoEncodeDesc.h265PictureDesc ? videoEncodeDesc.h265PictureDesc->sequenceParameterSetId : 0);
+        if (sps)
+            hevcGop.log2_max_pic_order_cnt_lsb_minus4 = sps->log2MaxPictureOrderCountLsbMinus4;
+    }
 
     D3D12_VIDEO_ENCODER_ENCODEFRAME_INPUT_ARGUMENTS1 input = {};
     D3D12_VIDEO_ENCODER_ENCODEFRAME_OUTPUT_ARGUMENTS1 output = {};
@@ -1352,6 +1643,18 @@ NRI_INLINE void CommandBufferD3D12::EncodeVideo(const VideoEncodeDesc& videoEnco
     h264Picture.pList0ReferenceFrames = h264List0ReferenceNum ? (UINT*)h264List0References : nullptr;
     h264Picture.List1ReferenceFramesCount = h264List1ReferenceNum;
     h264Picture.pList1ReferenceFrames = h264List1ReferenceNum ? (UINT*)h264List1References : nullptr;
+    // The driver does not know the PPS: the slice header carries "num_ref_idx_active_override_flag" only if requested (otherwise the active counts equal the PPS defaults)
+    if (sessionDesc.codec == VideoCodec::H264 && encodeParameters && encodeParameters->GetH264Parameters()) {
+        const VideoH264SessionParametersDesc& parameters = *encodeParameters->GetH264Parameters();
+        const VideoH264PictureParameterSetDesc* pps = video::FindParameterSet(parameters.pictureParameterSets, parameters.pictureParameterSetNum, &VideoH264PictureParameterSetDesc::pictureParameterSetId, (uint8_t)h264Picture.pic_parameter_set_id);
+        const bool isInterPicture = pictureDesc.frameType == VideoFrameType::P || pictureDesc.frameType == VideoFrameType::B;
+        if (pps && isInterPicture) {
+            const bool isL0Different = h264List0ReferenceNum != pps->refIndexL0DefaultActiveMinus1 + 1u;
+            const bool isL1Different = pictureDesc.frameType == VideoFrameType::B && h264List1ReferenceNum != pps->refIndexL1DefaultActiveMinus1 + 1u;
+            if (isL0Different || isL1Different)
+                h264Picture.Flags |= D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_H264_FLAG_REQUEST_NUM_REF_IDX_ACTIVE_OVERRIDE_FLAG_SLICE;
+        }
+    }
     h264Picture.ReferenceFramesReconPictureDescriptorsCount = videoEncodeDesc.referenceNum;
     h264Picture.pReferenceFramesReconPictureDescriptors = videoEncodeDesc.referenceNum ? (D3D12_VIDEO_ENCODER_REFERENCE_PICTURE_DESCRIPTOR_H264*)h264ReferenceDescriptors : nullptr;
 
@@ -1376,6 +1679,7 @@ NRI_INLINE void CommandBufferD3D12::EncodeVideo(const VideoEncodeDesc& videoEnco
     const uint32_t h265ReferenceNum = sessionDesc.codec == VideoCodec::H265 ? videoEncodeDesc.referenceNum : 0;
     Scratch<UINT> hevcList0References = NRI_ALLOCATE_SCRATCH(m_Device, UINT, h265ReferenceNum);
     Scratch<UINT> hevcList1References = NRI_ALLOCATE_SCRATCH(m_Device, UINT, h265ReferenceNum);
+    video::h265::EncodeInitialLists hevcInitialLists = {};
     Scratch<D3D12_VIDEO_ENCODER_REFERENCE_PICTURE_DESCRIPTOR_HEVC> hevcReferenceDescriptors = NRI_ALLOCATE_SCRATCH(m_Device, D3D12_VIDEO_ENCODER_REFERENCE_PICTURE_DESCRIPTOR_HEVC, h265ReferenceNum);
     if (sessionDesc.codec == VideoCodec::H265) {
         video::h265::EncodeReferenceLists hevcReferenceLists = {};
@@ -1389,6 +1693,48 @@ NRI_INLINE void CommandBufferD3D12::EncodeVideo(const VideoEncodeDesc& videoEnco
         for (uint32_t i = 0; i < hevcReferenceLists.list1Num; i++)
             hevcList1References[i] = hevcReferenceLists.list1[i];
 
+        if (!video::h265::BuildEncodeInitialLists(videoEncodeDesc.references, videoEncodeDesc.h265ReferenceDescs, videoEncodeDesc.referenceNum, pictureDesc.pictureOrderCount, hevcReferenceLists, hevcInitialLists)) {
+            NRI_CHECK(false, "Failed to build D3D12 H.265 initial reference picture lists from validated descriptors");
+            return;
+        }
+
+        // D3D12 takes the initial lists in "pList*ReferenceFrames" and applies "pList*RefPicModifications" to them, and the driver writes
+        // "ref_pic_lists_modification" only for given modifications. If the PPS signals list modifications, they are required whenever
+        // "NumPicTotalCurr > 1" (all references are used by the current picture) and keep the application's order. Otherwise the initial
+        // order replaces it, which only renumbers "ref_idx"
+        const VideoH265PictureParameterSetDesc* hevcPps = nullptr;
+        if (encodeParameters && encodeParameters->GetH265Parameters()) {
+            const VideoH265SessionParametersDesc& parameters = *encodeParameters->GetH265Parameters();
+            const uint8_t ppsId = videoEncodeDesc.h265PictureDesc ? videoEncodeDesc.h265PictureDesc->pictureParameterSetId : 0;
+            hevcPps = video::FindParameterSet(parameters.pictureParameterSets, parameters.pictureParameterSetNum, &VideoH265PictureParameterSetDesc::pictureParameterSetId, ppsId);
+        }
+
+        for (uint32_t i = 0; i < hevcReferenceLists.list0Num; i++) {
+            // Short-term references only (validated): List0 holds the preceding, List1 the following pictures, the first entries of the initial lists
+            const bool isPrefix = hevcInitialLists.list0Entries[i] < hevcReferenceLists.list0Num;
+            NRI_CHECK(isPrefix, "D3D12 H.265 encode 'List0' doesn't hold the first entries of the initial reference picture list");
+            if (!isPrefix)
+                return;
+
+            hevcList0References[i] = hevcInitialLists.temp0[i];
+        }
+        for (uint32_t i = 0; i < hevcReferenceLists.list1Num; i++) {
+            // Short-term references only (validated): List0 holds the preceding, List1 the following pictures, the first entries of the initial lists
+            const bool isPrefix = hevcInitialLists.list1Entries[i] < hevcReferenceLists.list1Num;
+            NRI_CHECK(isPrefix, "D3D12 H.265 encode 'List1' doesn't hold the first entries of the initial reference picture list");
+            if (!isPrefix)
+                return;
+
+            hevcList1References[i] = hevcInitialLists.temp1[i];
+        }
+
+        if (hevcPps && (hevcPps->flags & VideoH265PictureParameterSetBits::LISTS_MODIFICATION_PRESENT) && videoEncodeDesc.referenceNum > 1) {
+            hevcPicture.List0RefPicModificationsCount = hevcReferenceLists.list0Num;
+            hevcPicture.pList0RefPicModifications = hevcReferenceLists.list0Num ? (UINT*)hevcInitialLists.list0Entries.data() : nullptr;
+            hevcPicture.List1RefPicModificationsCount = hevcReferenceLists.list1Num;
+            hevcPicture.pList1RefPicModifications = hevcReferenceLists.list1Num ? (UINT*)hevcInitialLists.list1Entries.data() : nullptr;
+        }
+
         for (uint32_t i = 0; i < videoEncodeDesc.referenceNum; i++) {
             const VideoH265ReferenceDesc* referenceDesc = video::FindReferenceDesc(videoEncodeDesc.h265ReferenceDescs, videoEncodeDesc.referenceNum, videoEncodeDesc.references[i].slot);
             hevcReferenceDescriptors[i] = {};
@@ -1399,13 +1745,24 @@ NRI_INLINE void CommandBufferD3D12::EncodeVideo(const VideoEncodeDesc& videoEnco
             hevcReferenceDescriptors[i].TemporalLayerIndex = referenceDesc ? referenceDesc->temporalLayer : 0;
         }
 
-        hevcPicture.slice_pic_parameter_set_id = 0;
+        hevcPicture.slice_pic_parameter_set_id = videoEncodeDesc.h265PictureDesc ? videoEncodeDesc.h265PictureDesc->pictureParameterSetId : 0;
         hevcPicture.PictureOrderCountNumber = (UINT)pictureDesc.pictureOrderCount;
         hevcPicture.TemporalLayerIndex = pictureDesc.temporalLayer;
         hevcPicture.List0ReferenceFramesCount = hevcReferenceLists.list0Num;
         hevcPicture.pList0ReferenceFrames = hevcReferenceLists.list0Num ? (UINT*)hevcList0References : nullptr;
         hevcPicture.List1ReferenceFramesCount = hevcReferenceLists.list1Num;
         hevcPicture.pList1ReferenceFrames = hevcReferenceLists.list1Num ? (UINT*)hevcList1References : nullptr;
+        hevcPicture.num_ref_idx_l0_active_minus1 = hevcReferenceLists.list0Num ? hevcReferenceLists.list0Num - 1 : 0;
+        hevcPicture.num_ref_idx_l1_active_minus1 = hevcReferenceLists.list1Num ? hevcReferenceLists.list1Num - 1 : 0;
+        const bool isInterPicture = pictureDesc.frameType == VideoFrameType::P || pictureDesc.frameType == VideoFrameType::B;
+        if (isInterPicture) {
+            const uint32_t l0Default = hevcPps ? hevcPps->refIndexL0DefaultActiveMinus1 + 1u : 1;
+            const uint32_t l1Default = hevcPps ? hevcPps->refIndexL1DefaultActiveMinus1 + 1u : 1;
+            const bool isL0Different = hevcReferenceLists.list0Num != l0Default;
+            const bool isL1Different = pictureDesc.frameType == VideoFrameType::B && hevcReferenceLists.list1Num != l1Default;
+            if (isL0Different || isL1Different)
+                hevcPicture.Flags |= D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC_FLAG_REQUEST_NUM_REF_IDX_ACTIVE_OVERRIDE_FLAG_SLICE;
+        }
         hevcPicture.ReferenceFramesReconPictureDescriptorsCount = videoEncodeDesc.referenceNum;
         hevcPicture.pReferenceFramesReconPictureDescriptors = videoEncodeDesc.referenceNum ? (D3D12_VIDEO_ENCODER_REFERENCE_PICTURE_DESCRIPTOR_HEVC*)hevcReferenceDescriptors : nullptr;
     }
@@ -1425,30 +1782,23 @@ NRI_INLINE void CommandBufferD3D12::EncodeVideo(const VideoEncodeDesc& videoEnco
         const VideoAV1PictureBits pictureFlags = (videoEncodeDesc.av1PictureDesc && videoEncodeDesc.av1PictureDesc->flags != VideoAV1PictureBits::NONE)
             ? videoEncodeDesc.av1PictureDesc->flags
             : video::av1::GetDefaultPictureFlags();
-        if (pictureFlags & VideoAV1PictureBits::ERROR_RESILIENT_MODE)
-            av1Picture.Flags |= D3D12_VIDEO_ENCODER_AV1_PICTURE_CONTROL_FLAG_ENABLE_ERROR_RESILIENT_MODE;
         if (session.GetAV1FeatureFlags() & D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_LOOP_RESTORATION_FILTER) {
             for (auto& type : av1Picture.FrameRestorationConfig.FrameRestorationType)
                 type = D3D12_VIDEO_ENCODER_AV1_RESTORATION_TYPE_DISABLED;
             for (auto& tileSize : av1Picture.FrameRestorationConfig.LoopRestorationPixelSize)
                 tileSize = D3D12_VIDEO_ENCODER_AV1_RESTORATION_TILESIZE_DISABLED;
         }
-        if ((session.GetAV1FeatureFlags() & D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_FORCED_INTEGER_MOTION_VECTORS) && (pictureFlags & VideoAV1PictureBits::FORCE_INTEGER_MV))
-            av1Picture.Flags |= D3D12_VIDEO_ENCODER_AV1_PICTURE_CONTROL_FLAG_FORCE_INTEGER_MOTION_VECTORS;
         if (videoEncodeDesc.av1PictureDesc && videoEncodeDesc.av1PictureDesc->segmentation) {
             NRI_REPORT_ERROR(&m_Device, "D3D12 AV1 encode does not support explicit segmentation");
             return;
         }
-        if ((session.GetAV1FeatureFlags() & D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_AUTO_SEGMENTATION) && (pictureFlags & VideoAV1PictureBits::SEGMENTATION_ENABLED))
-            av1Picture.Flags |= D3D12_VIDEO_ENCODER_AV1_PICTURE_CONTROL_FLAG_ENABLE_FRAME_SEGMENTATION_AUTO;
+        av1Picture.Flags |= GetVideoEncodeAV1PictureControlFlags(pictureFlags, session.GetAV1FeatureFlags(), session.GetAV1RequiredFeatureFlags());
         av1Picture.FrameType = frameType;
         av1Picture.CompoundPredictionType = D3D12_VIDEO_ENCODER_AV1_COMP_PREDICTION_TYPE_SINGLE_REFERENCE;
-        av1Picture.InterpolationFilter = (videoEncodeDesc.av1PictureDesc && videoEncodeDesc.av1PictureDesc->interpolationFilter)
+        av1Picture.InterpolationFilter = videoEncodeDesc.av1PictureDesc
             ? (D3D12_VIDEO_ENCODER_AV1_INTERPOLATION_FILTERS)videoEncodeDesc.av1PictureDesc->interpolationFilter
             : D3D12_VIDEO_ENCODER_AV1_INTERPOLATION_FILTERS_SWITCHABLE;
-        av1Picture.TxMode = (videoEncodeDesc.av1PictureDesc && videoEncodeDesc.av1PictureDesc->txMode)
-            ? (D3D12_VIDEO_ENCODER_AV1_TX_MODE)videoEncodeDesc.av1PictureDesc->txMode
-            : (pictureDesc.frameType == VideoFrameType::P ? D3D12_VIDEO_ENCODER_AV1_TX_MODE_SELECT : D3D12_VIDEO_ENCODER_AV1_TX_MODE_LARGEST);
+        av1Picture.TxMode = (D3D12_VIDEO_ENCODER_AV1_TX_MODE)GetVideoEncodeAV1TxMode(videoEncodeDesc.av1PictureDesc, pictureDesc.frameType);
         av1Picture.OrderHint = videoEncodeDesc.av1PictureDesc ? videoEncodeDesc.av1PictureDesc->orderHint : (UINT)pictureDesc.pictureOrderCount;
         av1Picture.PictureIndex = videoEncodeDesc.av1PictureDesc ? videoEncodeDesc.av1PictureDesc->currentFrameId : pictureDesc.frameIndex;
         av1Picture.TemporalLayerIndexPlus1 = pictureDesc.temporalLayer + 1;
@@ -1457,7 +1807,7 @@ NRI_INLINE void CommandBufferD3D12::EncodeVideo(const VideoEncodeDesc& videoEnco
         av1Picture.RefreshFrameFlags = videoEncodeDesc.av1PictureDesc ? videoEncodeDesc.av1PictureDesc->refreshFrameFlags : ((pictureDesc.frameType == VideoFrameType::IDR && sessionDesc.maxReferenceNum) ? 0xFF : 0);
         if (frameType == D3D12_VIDEO_ENCODER_AV1_FRAME_TYPE_KEY_FRAME) {
             av1Picture.PrimaryRefFrame = 7;
-            av1Picture.RefreshFrameFlags = sessionDesc.maxReferenceNum ? 0xFF : 0;
+            av1Picture.RefreshFrameFlags = 0xFF; // AV1 requires all reference frames to be refreshed by shown key frames
         }
         av1Picture.Quantization.BaseQIndex = (videoEncodeDesc.av1PictureDesc && videoEncodeDesc.av1PictureDesc->baseQIndex)
             ? videoEncodeDesc.av1PictureDesc->baseQIndex
@@ -1511,7 +1861,7 @@ NRI_INLINE void CommandBufferD3D12::EncodeVideo(const VideoEncodeDesc& videoEnco
                 av1Picture.LoopFilter.ModeDeltas[i] = loopFilter.modeDeltas[i];
         }
         if (session.GetAV1FeatureFlags() & D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_CDEF_FILTERING) {
-            av1Picture.CDEF.CdefDampingMinus3 = (videoEncodeDesc.av1PictureDesc && videoEncodeDesc.av1PictureDesc->cdefDampingMinus3) ? videoEncodeDesc.av1PictureDesc->cdefDampingMinus3 : 3;
+            av1Picture.CDEF.CdefDampingMinus3 = videoEncodeDesc.av1PictureDesc ? videoEncodeDesc.av1PictureDesc->cdefDampingMinus3 : 3;
             av1Picture.CDEF.CdefBits = videoEncodeDesc.av1PictureDesc ? videoEncodeDesc.av1PictureDesc->cdefBits : 0;
             if (videoEncodeDesc.av1PictureDesc && videoEncodeDesc.av1PictureDesc->cdef) {
                 const VideoAV1CdefDesc& cdef = *videoEncodeDesc.av1PictureDesc->cdef;
@@ -1600,6 +1950,7 @@ NRI_INLINE void CommandBufferD3D12::EncodeVideo(const VideoEncodeDesc& videoEnco
 
     VideoPictureD3D12& srcPicture = *(VideoPictureD3D12*)videoEncodeDesc.srcPicture;
 
+    sequenceControl.Flags |= session.UpdateEncodeGop(gop, rateControlDesc.mode);
     input.SequenceControlDesc = sequenceControl;
     input.PictureControlDesc = pictureControl;
     input.CurrentFrameBitstreamMetadataSize = (UINT)videoEncodeDesc.bitstreamMetadataSize;
@@ -1645,7 +1996,7 @@ NRI_INLINE void CommandBufferD3D12::EncodeVideo(const VideoEncodeDesc& videoEnco
 
     ID3D12VideoEncodeCommandListBest* commandList = GetVideoEncodeCommandList();
 
-    commandList->EncodeFrame1(session.GetEncoder(), session.GetEncoderHeap(), &input, &output);
+    EncodeVideoFrame(commandList, m_Version, session.GetEncoder(), session.GetEncoderHeap(), sessionDesc.codec, input, output);
 
     if (videoEncodeDesc.resolvedMetadata) {
         D3D12_RESOURCE_BARRIER metadataReady = {};
@@ -1656,7 +2007,7 @@ NRI_INLINE void CommandBufferD3D12::EncodeVideo(const VideoEncodeDesc& videoEnco
         metadataReady.Transition.StateAfter = D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ;
         commandList->ResourceBarrier(1, &metadataReady); // TODO-VIDEO: support enhanced barriers too
 
-        commandList->ResolveEncoderOutputMetadata1(&resolveInput, &resolveOutput);
+        ResolveVideoEncoderOutputMetadata(commandList, m_Version, resolveInput, resolveOutput);
 
         std::swap(metadataReady.Transition.StateBefore, metadataReady.Transition.StateAfter);
         commandList->ResourceBarrier(1, &metadataReady);
@@ -1755,7 +2106,8 @@ NRI_INLINE void CommandBufferD3D12::ClearAttachments(const ClearAttachmentDesc* 
             if (clearAttachmentDesc.planes & PlaneBits::STENCIL)
                 clearFlags |= D3D12_CLEAR_FLAG_STENCIL;
 
-            D3D12_CPU_DESCRIPTOR_HANDLE handle = {m_Depth.attachment->GetDescriptorHandleCPU()};
+            const DescriptorD3D12* depthStencil = m_Depth.attachment ? m_Depth.attachment : m_Stencil.attachment;
+            D3D12_CPU_DESCRIPTOR_HANDLE handle = {depthStencil->GetDescriptorHandleCPU()};
             GetGraphicsCommandList()->ClearDepthStencilView(handle, clearFlags, clearAttachmentDesc.value.depthStencil.depth, clearAttachmentDesc.value.depthStencil.stencil, rectNum, d3dRects);
         }
     }
@@ -1822,14 +2174,17 @@ NRI_INLINE void CommandBufferD3D12::BeginRendering(const RenderingDesc& renderin
             GetGraphicsCommandList()->ClearRenderTargetView(renderTargets[i], &attachmentDesc.clearValue.color.f.x, 0, nullptr);
     }
 
+    const AttachmentDesc& stencil = renderingDesc.stencil.descriptor ? renderingDesc.stencil : renderingDesc.depth;
     D3D12_CLEAR_FLAGS clearFlags = (D3D12_CLEAR_FLAGS)0;
+
     if (renderingDesc.depth.loadOp == LoadOp::CLEAR)
         clearFlags |= D3D12_CLEAR_FLAG_DEPTH;
-    if (renderingDesc.stencil.loadOp == LoadOp::CLEAR)
+
+    if (m_Stencil.attachment && stencil.loadOp == LoadOp::CLEAR)
         clearFlags |= D3D12_CLEAR_FLAG_STENCIL;
 
     if (clearFlags)
-        GetGraphicsCommandList()->ClearDepthStencilView(depthStencil, clearFlags, renderingDesc.depth.clearValue.depthStencil.depth, renderingDesc.stencil.clearValue.depthStencil.stencil, 0, nullptr);
+        GetGraphicsCommandList()->ClearDepthStencilView(depthStencil, clearFlags, renderingDesc.depth.clearValue.depthStencil.depth, stencil.clearValue.depthStencil.stencil, 0, nullptr);
 
     // Shading rate
     if (m_Device.GetDesc().tiers.shadingRate >= 2) {
@@ -1872,9 +2227,9 @@ NRI_INLINE void CommandBufferD3D12::EndRendering() {
     Scratch<D3D12_RESOURCE_BARRIER> resourceBarriers = NRI_ALLOCATE_SCRATCH(m_Device, D3D12_RESOURCE_BARRIER, resourceBarrierNum * 2);
     uint32_t barrierNum = 0;
 
-    constexpr uint32_t attachmentNum = (D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT + 2) * 2; // (colors, depth and stencil) x (src and dst)
+    constexpr uint32_t attachmentNum = D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT + 2; // colors, depth and stencil
 #if NRI_ENABLE_AGILITY_SDK_SUPPORT
-    std::array<D3D12_TEXTURE_BARRIER, attachmentNum> textureBarriers = {};
+    std::array<D3D12_TEXTURE_BARRIER, attachmentNum * 2> textureBarriers = {};
 
     D3D12_BARRIER_GROUP barrierGroup = {};
     barrierGroup.Type = D3D12_BARRIER_TYPE_TEXTURE;
@@ -1909,13 +2264,12 @@ NRI_INLINE void CommandBufferD3D12::EndRendering() {
 
             const TexViewDesc& dstDesc = resolveDst->GetTexViewDesc();
             D3D12_RESOURCE_DESC dstResourceDesc = resolveDst->GetResource()->GetDesc();
-
             for (uint32_t layer = 0; layer < srcDesc.layerNum; layer++) {
                 uint32_t srcSubresource = GetSubresourceIndex(srcDesc.layerOffset + layer, srcResourceDesc.DepthOrArraySize, srcDesc.mipOffset, srcResourceDesc.MipLevels, planeBits);
-                FillLegacyResolveBarrier(true, *resolveSrc, srcSubresource, resourceBarriers[barrierNum++]);
+                FillLegacyResolveBarrier(true, *resolveSrc, planeBits, srcSubresource, resourceBarriers[barrierNum++]);
 
                 uint32_t dstSubresource = GetSubresourceIndex(dstDesc.layerOffset + layer, dstResourceDesc.DepthOrArraySize, dstDesc.mipOffset, dstResourceDesc.MipLevels, planeBits);
-                FillLegacyResolveBarrier(false, *resolveDst, dstSubresource, resourceBarriers[barrierNum++]);
+                FillLegacyResolveBarrier(false, *resolveDst, planeBits, dstSubresource, resourceBarriers[barrierNum++]);
             }
         }
     }
@@ -1956,9 +2310,13 @@ NRI_INLINE void CommandBufferD3D12::EndRendering() {
             ID3D12Resource* dstResource = attachmentDesc->resolveDst->GetResource();
             D3D12_RESOURCE_DESC dstResourceDesc = dstResource->GetDesc();
             const TexViewDesc& dstDesc = attachmentDesc->resolveDst->GetTexViewDesc();
-            uint32_t dstSubresource = GetSubresourceIndex(dstDesc.layerOffset, dstResourceDesc.DepthOrArraySize, dstDesc.mipOffset, dstResourceDesc.DepthOrArraySize, planeBits);
+            uint32_t dstSubresource = GetSubresourceIndex(dstDesc.layerOffset, dstResourceDesc.DepthOrArraySize, dstDesc.mipOffset, dstResourceDesc.MipLevels, planeBits);
 
-            GetGraphicsCommandList()->ResolveSubresourceRegion(dstResource, dstSubresource, 0, 0, srcResource, srcSubresource, nullptr, format.typed, resolveMode);
+            for (uint32_t layer = 0; layer < srcDesc.layerNum; layer++) {
+                GetGraphicsCommandList()->ResolveSubresourceRegion(dstResource, dstSubresource, 0, 0, srcResource, srcSubresource, nullptr, format.typed, resolveMode);
+                srcSubresource += srcResourceDesc.MipLevels;
+                dstSubresource += dstResourceDesc.MipLevels;
+            }
         }
 
         // Restore state
@@ -2220,29 +2578,11 @@ NRI_INLINE void CommandBufferD3D12::ResolveTexture(Texture& dstTexture, const Te
 NRI_INLINE void CommandBufferD3D12::UploadBufferToTexture(Texture& dstTexture, const TextureRegionDesc& dstRegion, const Buffer& srcBuffer, const TextureDataLayoutDesc& srcDataLayout) {
     const TextureD3D12& dst = (TextureD3D12&)dstTexture;
     const TextureDesc& dstDesc = dst.GetDesc();
-    auto getPlaneCompatibleFormat = [](Format format, PlaneBits planes) {
-        if (format == Format::NV12_UNORM) {
-            if (planes & PlaneBits::PLANE_0)
-                return DXGI_FORMAT_R8_UNORM;
-            if (planes & PlaneBits::PLANE_1)
-                return DXGI_FORMAT_R8G8_UNORM;
-        } else if (format == Format::P010_UNORM || format == Format::P016_UNORM) {
-            if (planes & PlaneBits::PLANE_0)
-                return DXGI_FORMAT_R16_UNORM;
-            if (planes & PlaneBits::PLANE_1)
-                return DXGI_FORMAT_R16G16_UNORM;
-        }
-
-        return GetDxgiFormat(format).typeless;
-    };
-    auto getPlaneDivisor = [](Format format, PlaneBits planes) {
-        return ((planes & PlaneBits::PLANE_1) && (format == Format::NV12_UNORM || format == Format::P010_UNORM || format == Format::P016_UNORM)) ? 2u : 1u;
-    };
 
     D3D12_TEXTURE_COPY_LOCATION dstTextureCopyLocation = {dst, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
     dstTextureCopyLocation.SubresourceIndex = GetSubresourceIndex(dstRegion.layerOffset, dstDesc.layerNum, dstRegion.mipOffset, dstDesc.mipNum, dstRegion.planes);
 
-    const uint32_t planeDivisor = getPlaneDivisor(dstDesc.format, dstRegion.planes);
+    const uint32_t planeDivisor = GetPlaneDivisor(dstDesc.format, dstRegion.planes);
     const uint32_t size[3] = {
         (dstRegion.width == WHOLE_SIZE ? dst.GetSize(0, dstRegion.mipOffset) : dstRegion.width) / planeDivisor,
         (dstRegion.height == WHOLE_SIZE ? dst.GetSize(1, dstRegion.mipOffset) : dstRegion.height) / planeDivisor,
@@ -2255,7 +2595,7 @@ NRI_INLINE void CommandBufferD3D12::UploadBufferToTexture(Texture& dstTexture, c
     srcTextureCopyLocation.pResource = (BufferD3D12&)srcBuffer;
     srcTextureCopyLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     srcTextureCopyLocation.PlacedFootprint.Offset = srcDataLayout.offset;
-    srcTextureCopyLocation.PlacedFootprint.Footprint.Format = getPlaneCompatibleFormat(dstDesc.format, dstRegion.planes);
+    srcTextureCopyLocation.PlacedFootprint.Footprint.Format = GetPlaneCompatibleFormat(dstDesc.format, dstRegion.planes);
     srcTextureCopyLocation.PlacedFootprint.Footprint.Width = size[0];
     srcTextureCopyLocation.PlacedFootprint.Footprint.Height = size[1];
     srcTextureCopyLocation.PlacedFootprint.Footprint.Depth = size[2];
@@ -2267,29 +2607,11 @@ NRI_INLINE void CommandBufferD3D12::UploadBufferToTexture(Texture& dstTexture, c
 NRI_INLINE void CommandBufferD3D12::ReadbackTextureToBuffer(Buffer& dstBuffer, const TextureDataLayoutDesc& dstDataLayout, const Texture& srcTexture, const TextureRegionDesc& srcRegion) {
     const TextureD3D12& src = (TextureD3D12&)srcTexture;
     const TextureDesc& srcDesc = src.GetDesc();
-    auto getPlaneCompatibleFormat = [](Format format, PlaneBits planes) {
-        if (format == Format::NV12_UNORM) {
-            if (planes & PlaneBits::PLANE_0)
-                return DXGI_FORMAT_R8_UNORM;
-            if (planes & PlaneBits::PLANE_1)
-                return DXGI_FORMAT_R8G8_UNORM;
-        } else if (format == Format::P010_UNORM || format == Format::P016_UNORM) {
-            if (planes & PlaneBits::PLANE_0)
-                return DXGI_FORMAT_R16_UNORM;
-            if (planes & PlaneBits::PLANE_1)
-                return DXGI_FORMAT_R16G16_UNORM;
-        }
-
-        return GetDxgiFormat(format).typeless;
-    };
-    auto getPlaneDivisor = [](Format format, PlaneBits planes) {
-        return ((planes & PlaneBits::PLANE_1) && (format == Format::NV12_UNORM || format == Format::P010_UNORM || format == Format::P016_UNORM)) ? 2u : 1u;
-    };
 
     D3D12_TEXTURE_COPY_LOCATION srcTextureCopyLocation = {src, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
     srcTextureCopyLocation.SubresourceIndex = GetSubresourceIndex(srcRegion.layerOffset, srcDesc.layerNum, srcRegion.mipOffset, srcDesc.mipNum, srcRegion.planes);
 
-    const uint32_t planeDivisor = getPlaneDivisor(srcDesc.format, srcRegion.planes);
+    const uint32_t planeDivisor = GetPlaneDivisor(srcDesc.format, srcRegion.planes);
     uint32_t w = (srcRegion.width == WHOLE_SIZE ? src.GetSize(0, srcRegion.mipOffset) : srcRegion.width) / planeDivisor;
     uint32_t h = (srcRegion.height == WHOLE_SIZE ? src.GetSize(1, srcRegion.mipOffset) : srcRegion.height) / planeDivisor;
     uint32_t d = srcRegion.depth == WHOLE_SIZE ? src.GetSize(2, srcRegion.mipOffset) : srcRegion.depth;
@@ -2300,7 +2622,7 @@ NRI_INLINE void CommandBufferD3D12::ReadbackTextureToBuffer(Buffer& dstBuffer, c
     dstTextureCopyLocation.pResource = (BufferD3D12&)dstBuffer;
     dstTextureCopyLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     dstTextureCopyLocation.PlacedFootprint.Offset = dstDataLayout.offset;
-    dstTextureCopyLocation.PlacedFootprint.Footprint.Format = getPlaneCompatibleFormat(srcDesc.format, srcRegion.planes);
+    dstTextureCopyLocation.PlacedFootprint.Footprint.Format = GetPlaneCompatibleFormat(srcDesc.format, srcRegion.planes);
     dstTextureCopyLocation.PlacedFootprint.Footprint.Width = w;
     dstTextureCopyLocation.PlacedFootprint.Footprint.Height = h;
     dstTextureCopyLocation.PlacedFootprint.Footprint.Depth = d;
@@ -2356,8 +2678,8 @@ NRI_INLINE void CommandBufferD3D12::Barrier(const BarrierDesc& barrierDesc) {
 
                 D3D12_GLOBAL_BARRIER& out = globalBarriers[i];
                 out = {};
-                out.SyncBefore = GetBarrierSyncFlags(in.before.stages, in.before.access);
-                out.SyncAfter = GetBarrierSyncFlags(in.after.stages, in.after.access);
+                out.SyncBefore = GetGlobalBarrierSyncFlags(in.before.stages, in.before.access);
+                out.SyncAfter = GetGlobalBarrierSyncFlags(in.after.stages, in.after.access);
                 out.AccessBefore = GetBarrierAccessFlags(in.before.access);
                 out.AccessAfter = GetBarrierAccessFlags(in.after.access);
             }
@@ -2424,11 +2746,12 @@ NRI_INLINE void CommandBufferD3D12::Barrier(const BarrierDesc& barrierDesc) {
         }
 
         // Texture
-        Scratch<D3D12_TEXTURE_BARRIER> textureBarriers = NRI_ALLOCATE_SCRATCH(m_Device, D3D12_TEXTURE_BARRIER, barrierDesc.textureNum);
+        const bool isCopyList = m_CommandListType == D3D12_COMMAND_LIST_TYPE_COPY;
+        Scratch<D3D12_TEXTURE_BARRIER> textureBarriers = NRI_ALLOCATE_SCRATCH(m_Device, D3D12_TEXTURE_BARRIER, barrierDesc.textureNum * 2);
         if (barrierDesc.textureNum) {
             D3D12_BARRIER_GROUP* barrierGroup = &barrierGroups[barriersGroupsNum++];
             barrierGroup->Type = D3D12_BARRIER_TYPE_TEXTURE;
-            barrierGroup->NumBarriers = barrierDesc.textureNum;
+            barrierGroup->NumBarriers = 0;
             barrierGroup->pTextureBarriers = textureBarriers;
 
             for (uint32_t i = 0; i < barrierDesc.textureNum; i++) {
@@ -2439,14 +2762,7 @@ NRI_INLINE void CommandBufferD3D12::Barrier(const BarrierDesc& barrierDesc) {
                 Dim_t mipNum = in.mipNum == REMAINING ? (textureDesc.mipNum - in.mipOffset) : in.mipNum;
                 Dim_t layerNum = in.layerNum == REMAINING ? (textureDesc.layerNum - in.layerOffset) : in.layerNum;
 
-                D3D12_TEXTURE_BARRIER& out = textureBarriers[i];
-                out = {};
-                out.SyncBefore = GetBarrierSyncFlags(in.before.stages, in.before.access);
-                out.SyncAfter = GetBarrierSyncFlags(in.after.stages, in.after.access);
-                out.AccessBefore = GetBarrierAccessFlags(in.before.access);
-                out.AccessAfter = GetBarrierAccessFlags(in.after.access);
-                out.LayoutBefore = GetBarrierLayout(in.before.layout, in.before.access);
-                out.LayoutAfter = GetBarrierLayout(in.after.layout, in.after.access);
+                D3D12_TEXTURE_BARRIER out = {};
                 out.pResource = texture;
                 out.Subresources.IndexOrFirstMipLevel = in.mipOffset;
                 out.Subresources.NumMipLevels = mipNum;
@@ -2454,9 +2770,11 @@ NRI_INLINE void CommandBufferD3D12::Barrier(const BarrierDesc& barrierDesc) {
                 out.Subresources.NumArraySlices = layerNum;
 
                 const FormatProps& formatProps = GetFormatProps(textureDesc.format);
+
                 if (textureDesc.format == Format::NV12_UNORM || textureDesc.format == Format::P010_UNORM || textureDesc.format == Format::P016_UNORM) {
-                    const bool plane0 = in.planes == PlaneBits::ALL || (in.planes & PlaneBits::PLANE_0);
-                    const bool plane1 = in.planes == PlaneBits::ALL || (in.planes & PlaneBits::PLANE_1);
+                    const bool isAllPlanes = in.planes == PlaneBits::ALL || (in.planes & PlaneBits::COLOR);
+                    const bool plane0 = isAllPlanes || (in.planes & PlaneBits::PLANE_0);
+                    const bool plane1 = isAllPlanes || (in.planes & PlaneBits::PLANE_1);
                     out.Subresources.FirstPlane = plane0 ? 0 : 1;
                     out.Subresources.NumPlanes = (plane0 && plane1) ? 2 : 1;
                 } else {
@@ -2476,6 +2794,29 @@ NRI_INLINE void CommandBufferD3D12::Barrier(const BarrierDesc& barrierDesc) {
 
                 // https://microsoft.github.io/DirectX-Specs/d3d/D3D12EnhancedBarriers.html#d3d12_texture_barrier_flags
                 out.Flags = in.before.layout == Layout::UNDEFINED ? D3D12_TEXTURE_BARRIER_FLAG_DISCARD : D3D12_TEXTURE_BARRIER_FLAG_NONE; // TODO: verify that it works
+
+                bool attachmentResolve = (in.before.access | in.after.access) & RESOLVE_ATTACHMENT_ACCESS;
+                bool shaderResource = attachmentResolve && !(((ID3D12Resource*)texture)->GetDesc().Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
+                bool splitPlanes = attachmentResolve && (formatProps.isDepth || formatProps.isStencil);
+                uint32_t planeNum = splitPlanes ? out.Subresources.NumPlanes : 1;
+                for (uint32_t plane = 0; plane < planeNum; plane++) {
+                    D3D12_TEXTURE_BARRIER& dst = textureBarriers[barrierGroup->NumBarriers++];
+                    dst = out;
+                    if (splitPlanes) {
+                        dst.Subresources.FirstPlane += plane;
+                        dst.Subresources.NumPlanes = 1;
+                    }
+
+                    PlaneBits planes = dst.Subresources.FirstPlane ? PlaneBits::STENCIL : PlaneBits::DEPTH;
+                    AccessLayoutStage before = GetResolveAttachmentState(in.before, textureDesc.format, planes, shaderResource);
+                    AccessLayoutStage after = GetResolveAttachmentState(in.after, textureDesc.format, planes, shaderResource);
+                    dst.SyncBefore = GetBarrierSyncFlags(before.stages, before.access);
+                    dst.SyncAfter = GetBarrierSyncFlags(after.stages, after.access);
+                    dst.AccessBefore = GetTextureBarrierAccessFlags(before);
+                    dst.AccessAfter = GetTextureBarrierAccessFlags(after);
+                    dst.LayoutBefore = GetBarrierLayout(before.layout, before.access, isCopyList || IsCopyQueue(in.srcQueue));
+                    dst.LayoutAfter = GetBarrierLayout(after.layout, after.access, isCopyList || IsCopyQueue(in.dstQueue));
+                }
             }
         }
 
@@ -2513,10 +2854,13 @@ NRI_INLINE void CommandBufferD3D12::Barrier(const BarrierDesc& barrierDesc) {
             Dim_t mipNum = barrier.mipNum == REMAINING ? (textureDesc.mipNum - barrier.mipOffset) : barrier.mipNum;
             Dim_t layerNum = barrier.layerNum == REMAINING ? (textureDesc.layerNum - barrier.layerOffset) : barrier.layerNum;
 
-            if (layerNum == textureDesc.layerNum && mipNum == textureDesc.mipNum && barrier.planes == PlaneBits::ALL)
+            bool attachmentResolve = (barrier.before.access | barrier.after.access) & RESOLVE_ATTACHMENT_ACCESS;
+            if (attachmentResolve)
+                barrierNum += layerNum * mipNum * 2;
+            else if (layerNum == textureDesc.layerNum && mipNum == textureDesc.mipNum && barrier.planes == PlaneBits::ALL)
                 barrierNum++;
             else
-                barrierNum += layerNum * mipNum;
+                barrierNum += layerNum * mipNum * GetLegacyBarrierPlaneNum(textureDesc.format, barrier.planes);
         }
 
         bool isGlobalUavBarrierNeeded = false;
@@ -2552,13 +2896,38 @@ NRI_INLINE void CommandBufferD3D12::Barrier(const BarrierDesc& barrierDesc) {
             Dim_t mipNum = barrier.mipNum == REMAINING ? (textureDesc.mipNum - barrier.mipOffset) : barrier.mipNum;
             Dim_t layerNum = barrier.layerNum == REMAINING ? (textureDesc.layerNum - barrier.layerOffset) : barrier.layerNum;
 
-            if (layerNum == textureDesc.layerNum && mipNum == textureDesc.mipNum && barrier.planes == PlaneBits::ALL)
+            bool attachmentResolve = (barrier.before.access | barrier.after.access) & RESOLVE_ATTACHMENT_ACCESS;
+            if (attachmentResolve) {
+                bool shaderResource = !(((ID3D12Resource*)texture)->GetDesc().Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
+                const FormatProps& formatProps = GetFormatProps(textureDesc.format);
+                const PlaneBits planes[] = {formatProps.isDepth ? PlaneBits::DEPTH : PlaneBits::COLOR, PlaneBits::STENCIL};
+                uint32_t planeNum = formatProps.isStencil ? 2 : 1;
+                for (uint32_t plane = 0; plane < planeNum; plane++) {
+                    if (barrier.planes != PlaneBits::ALL && !(barrier.planes & planes[plane]))
+                        continue;
+
+                    AccessLayoutStage before = GetResolveAttachmentState(barrier.before, textureDesc.format, planes[plane], shaderResource);
+                    AccessLayoutStage after = GetResolveAttachmentState(barrier.after, textureDesc.format, planes[plane], shaderResource);
+                    for (Dim_t layer = 0; layer < layerNum; layer++) {
+                        for (Dim_t mip = 0; mip < mipNum; mip++) {
+                            uint32_t subresource = GetSubresourceIndex(barrier.layerOffset + layer, textureDesc.layerNum, barrier.mipOffset + mip, textureDesc.mipNum, planes[plane]);
+                            ptr += AddResourceBarrier(commandListType, texture, before.access, after.access, *ptr, subresource);
+                        }
+                    }
+                }
+            } else if (layerNum == textureDesc.layerNum && mipNum == textureDesc.mipNum && barrier.planes == PlaneBits::ALL)
                 ptr += AddResourceBarrier(commandListType, texture, barrier.before.access, barrier.after.access, *ptr, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES);
             else {
-                for (Dim_t layer = 0; layer < layerNum; layer++) {
-                    for (Dim_t mip = 0; mip < mipNum; mip++) {
-                        uint32_t subresource = GetSubresourceIndex(barrier.layerOffset + layer, textureDesc.layerNum, barrier.mipOffset + mip, textureDesc.mipNum, barrier.planes);
-                        ptr += AddResourceBarrier(commandListType, texture, barrier.before.access, barrier.after.access, *ptr, subresource);
+                const uint32_t planeNum = GetLegacyBarrierPlaneNum(textureDesc.format, barrier.planes);
+
+                for (uint32_t plane = 0; plane < planeNum; plane++) {
+                    const PlaneBits planes = planeNum == 1 ? barrier.planes : (plane ? PlaneBits::PLANE_1 : PlaneBits::PLANE_0);
+
+                    for (Dim_t layer = 0; layer < layerNum; layer++) {
+                        for (Dim_t mip = 0; mip < mipNum; mip++) {
+                            uint32_t subresource = GetSubresourceIndex(barrier.layerOffset + layer, textureDesc.layerNum, barrier.mipOffset + mip, textureDesc.mipNum, planes);
+                            ptr += AddResourceBarrier(commandListType, texture, barrier.before.access, barrier.after.access, *ptr, subresource);
+                        }
                     }
                 }
             }

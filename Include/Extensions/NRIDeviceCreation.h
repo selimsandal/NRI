@@ -79,25 +79,37 @@ NriStruct(DeviceCreationDesc) {
     NriOptional uint32_t d3dShaderExtRegister;  // vendor specific shader extensions (default is "NRI_SHADER_EXT_REGISTER", space is always "0")
     NriOptional uint32_t d3dZeroBufferSize;     // no "memset" functionality in D3D, "CmdZeroBuffer" implemented via a bunch of copies (4 Mb by default)
 
+    // Directory holding "D3D12Core.dll" of the Agility SDK NRI was built against:
+    // - useful for hosts that cannot export "D3D12SDKVersion" / "D3D12SDKPath" (managed runtimes, plugins)
+    // - process-global: NULL keeps the current SDK selection, including a previously supplied custom path
+    // - existing global configuration is preserved; switching to a different runtime fails while incompatible devices remain alive
+    // - may be silently ignored if not supported
+    NriOptional const char* d3d12AgilitySdkPath;
+
     // Vulkan specific
     Nri(VKBindingOffsets) vkBindingOffsets;
     NriOptional Nri(VKExtensions) vkExtensions; // to enable
+    NriOptional const void* vkInstanceCreateInfoNext; // appended to "VkInstanceCreateInfo::pNext" after NRI's "VkDebugUtilsMessengerCreateInfoEXT" and "VkValidationFeaturesEXT" (i.e. "VkLayerSettingsCreateInfoEXT")
 
     // Switches (disabled by default)
     bool enableNRIValidation;                   // embedded validation layer, checks for NRI specifics
     bool enableGraphicsAPIValidation;           // GAPI-provided validation layer (D3D12: process-global; METAL: ignored, set "MTL_DEBUG_LAYER=1" instead)
     bool enableD3D11CommandBufferEmulation;     // enable? but why? (auto-enabled if deferred contexts are not supported)
     bool enableD3D12RayTracingValidation;       // slow but useful, can only be enabled if envvar "NV_ALLOW_RAYTRACING_VALIDATION" is set to "1"
+    bool enableD3D12GpuBasedValidation;         // D3D12: "ID3D12Debug1::SetEnableGPUBasedValidation" (slow, process-global, requires "enableGraphicsAPIValidation")
     bool enableMemoryZeroInitialization;        // page-clears are fast, but memory is not cleared by default in VK
 
     // Switches (enabled by default)
     bool disableVKRayTracing;                   // to save CPU memory in some implementations
     bool disableD3D12EnhancedBarriers;          // even if AgilitySDK is in use, some apps still use legacy barriers. It can be important for integrations
+    bool disableD3D12BreakOnError;              // D3D12: don't "SetBreakOnSeverity" for "ERROR" and "CORRUPTION" (messages still go through "CallbackInterface", if supported)
 };
 
 // if "adapterDescs == NULL", then "adapterDescNum" is set to the number of adapters
 // else "adapterDescNum" must be set to number of elements in "adapterDescs"
-NRI_API Nri(Result) NRI_CALL nriEnumerateAdapters(NriPtr(AdapterDesc) adapterDescs, NonNriRef(uint32_t) adapterDescNum);
+// "desiredGraphicsAPIs" selects backends to probe, not adapters to return; "ALL" probes every enabled backend
+// Adapter properties can differ depending on the probed backends
+NRI_API Nri(Result) NRI_CALL nriEnumerateAdapters(NriPtr(AdapterDesc) adapterDescs, NonNriRef(uint32_t) adapterDescNum, Nri(GraphicsAPI) desiredGraphicsAPIs NriDefault(GraphicsAPI::ALL));
 
 NRI_API Nri(Result) NRI_CALL nriCreateDevice(const NriRef(DeviceCreationDesc) deviceCreationDesc, NriOut NriRef(Device*) device);
 NRI_API void NRI_CALL nriDestroyDevice(NriPtr(Device) device);

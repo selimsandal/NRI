@@ -156,15 +156,15 @@ Result HelperDataUpload::Create(const TextureUploadDesc* textureUploadDescs, uin
     }
 
     { // Create other resources
-        Result result = m_iCore.CreateFence(m_Device, 0, m_Fence);
-        if (result != Result::SUCCESS)
-            return result;
+        FenceDesc fenceDesc = {};
+        Result result = m_iCore.CreateFence(m_Device, fenceDesc, m_Fence);
 
-        result = m_iCore.CreateCommandAllocator(m_Queue, m_CommandAllocator);
-        if (result != Result::SUCCESS)
-            return result;
+        if (result == Result::SUCCESS)
+            result = m_iCore.CreateCommandAllocator(m_Queue, m_CommandAllocator);
 
-        result = m_iCore.CreateCommandBuffer(*m_CommandAllocator, m_CommandBuffer);
+        if (result == Result::SUCCESS)
+            result = m_iCore.CreateCommandBuffer(*m_CommandAllocator, m_CommandBuffer);
+
         if (result != Result::SUCCESS)
             return result;
     }
@@ -382,7 +382,6 @@ HelperDeviceMemoryAllocator::MemoryHeap::MemoryHeap(MemoryType memoryType, const
     , bufferOffsets(stdAllocator)
     , textures(stdAllocator)
     , textureOffsets(stdAllocator)
-    , size(0)
     , type(memoryType) {
 }
 
@@ -452,14 +451,12 @@ Result HelperDeviceMemoryAllocator::TryToAllocateAndBindMemory(const ResourceGro
     }
 
     Result result = ProcessDedicatedResources(resourceGroupDesc, allocations, allocationNum);
-    if (result != Result::SUCCESS)
-        return result;
 
-    result = m_iCore.BindBufferMemory(m_BufferBindingDescs.data(), (uint32_t)m_BufferBindingDescs.size());
-    if (result != Result::SUCCESS)
-        return result;
+    if (result == Result::SUCCESS)
+        result = m_iCore.BindBufferMemory(m_BufferBindingDescs.data(), (uint32_t)m_BufferBindingDescs.size());
 
-    result = m_iCore.BindTextureMemory(m_TextureBindingDescs.data(), (uint32_t)m_TextureBindingDescs.size());
+    if (result == Result::SUCCESS)
+        result = m_iCore.BindTextureMemory(m_TextureBindingDescs.data(), (uint32_t)m_TextureBindingDescs.size());
 
     return result;
 }
@@ -556,7 +553,7 @@ void HelperDeviceMemoryAllocator::GroupByMemoryType(MemoryLocation memoryLocatio
 
     // Sort by "alignment"
     if (resourceGroupDesc.bufferNum > 1) {
-        std::sort(&buffers[0], &buffers[resourceGroupDesc.bufferNum - 1],
+        std::sort(&buffers[0], &buffers[0] + resourceGroupDesc.bufferNum,
             [](const BufferAndMemoryDesc& a, const BufferAndMemoryDesc& b) -> bool {
                 // Primary key: group by type
                 if (a.memoryDesc.type != b.memoryDesc.type)
@@ -568,7 +565,7 @@ void HelperDeviceMemoryAllocator::GroupByMemoryType(MemoryLocation memoryLocatio
     }
 
     if (resourceGroupDesc.textureNum > 1) {
-        std::sort(&textures[0], &textures[resourceGroupDesc.textureNum - 1],
+        std::sort(&textures[0], &textures[0] + resourceGroupDesc.textureNum,
             [](const TextureAndMemoryDesc& a, const TextureAndMemoryDesc& b) -> bool {
                 // Primary key: group by type
                 if (a.memoryDesc.type != b.memoryDesc.type)

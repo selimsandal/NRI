@@ -180,15 +180,10 @@ Result DeviceWGPU::Create(const DeviceCreationDesc& desc) {
         Vector<QueueWGPU*>& queueFamily = m_QueueFamilies[(uint32_t)queueFamilyDesc.queueType];
 
         for (uint32_t j = 0; j < queueFamilyDesc.queueNum; j++) {
-            QueueWGPU* queue = Allocate<QueueWGPU>(GetAllocationCallbacks(), *this);
-            if (!queue)
-                return Result::OUT_OF_MEMORY;
-
-            result = queue->Create(queueFamilyDesc.queueType, j);
-            if (result != Result::SUCCESS) {
-                Destroy(GetAllocationCallbacks(), queue);
+            QueueWGPU* queue = nullptr;
+            result = CreateImplementation<QueueWGPU>(queue, queueFamilyDesc.queueType, j);
+            if (result != Result::SUCCESS)
                 return result;
-            }
 
             queueFamily.push_back(queue);
         }
@@ -553,8 +548,8 @@ HostCopyLayoutWGPU DeviceWGPU::GetHostCopyLayout(const TextureWGPU& texture, con
     HostCopyLayoutWGPU layout = {};
     uint32_t width = region.width == WHOLE_SIZE ? GetDimension(GraphicsAPI::WGPU, textureDesc, 0, region.mipOffset) : region.width;
     uint32_t height = region.height == WHOLE_SIZE ? GetDimension(GraphicsAPI::WGPU, textureDesc, 1, region.mipOffset) : region.height;
-    layout.width = Align(width, formatProps.blockWidth);
-    layout.height = Align(height, formatProps.blockHeight);
+    layout.width = (width + formatProps.blockWidth - 1) / formatProps.blockWidth * formatProps.blockWidth;
+    layout.height = (height + formatProps.blockHeight - 1) / formatProps.blockHeight * formatProps.blockHeight;
     layout.depth = textureDesc.type == TextureType::TEXTURE_3D ? (region.depth == WHOLE_SIZE ? GetDimension(GraphicsAPI::WGPU, textureDesc, 2, region.mipOffset) : region.depth) : 1;
     layout.rowNum = (layout.height + formatProps.blockHeight - 1) / formatProps.blockHeight;
     layout.rowSize = ((layout.width + formatProps.blockWidth - 1) / formatProps.blockWidth) * formatProps.stride;

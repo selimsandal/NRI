@@ -60,16 +60,7 @@ using namespace nri;
 #include "VideoSessionParametersD3D12.hpp"
 
 Result CreateDeviceD3D12(const DeviceCreationDesc& desc, const DeviceCreationD3D12Desc& descD3D12, DeviceBase*& device) {
-    DeviceD3D12* impl = Allocate<DeviceD3D12>(desc.allocationCallbacks, desc.callbackInterface, desc.allocationCallbacks);
-    Result result = impl->Create(desc, descD3D12);
-
-    if (result != Result::SUCCESS) {
-        Destroy(desc.allocationCallbacks, impl);
-        device = nullptr;
-    } else
-        device = (DeviceBase*)impl;
-
-    return result;
+    return CreateImplementation(desc.allocationCallbacks, device, Allocate<DeviceD3D12>(desc.allocationCallbacks, desc.callbackInterface, desc.allocationCallbacks), desc, descD3D12);
 }
 
 //============================================================================================================================================================================================
@@ -104,8 +95,8 @@ static Result NRI_CALL CreateCommandBuffer(CommandAllocator& commandAllocator, C
     return ((CommandAllocatorD3D12&)commandAllocator).CreateCommandBuffer(commandBuffer);
 }
 
-static Result NRI_CALL CreateFence(Device& device, uint64_t initialValue, Fence*& fence) {
-    return ((DeviceD3D12&)device).CreateImplementation<FenceD3D12>(fence, initialValue);
+static Result NRI_CALL CreateFence(Device& device, const FenceDesc& fenceDesc, Fence*& fence) {
+    return ((DeviceD3D12&)device).CreateImplementation<FenceD3D12>(fence, fenceDesc);
 }
 
 static Result NRI_CALL CreateDescriptorPool(Device& device, const DescriptorPoolDesc& descriptorPoolDesc, DescriptorPool*& descriptorPool) {
@@ -257,53 +248,19 @@ static void NRI_CALL GetTextureMemoryDesc2(const Device& device, const TextureDe
 }
 
 static Result NRI_CALL CreateCommittedBuffer(Device& device, MemoryLocation memoryLocation, float priority, const BufferDesc& bufferDesc, Buffer*& buffer) {
-    DeviceD3D12& deviceD3D12 = (DeviceD3D12&)device;
-
-    Result result = deviceD3D12.CreateImplementation<BufferD3D12>(buffer, bufferDesc);
-    if (result != Result::SUCCESS)
-        return result;
-
-    return ((BufferD3D12*)buffer)->Allocate(memoryLocation, priority, true);
+    return ((DeviceD3D12&)device).CreateCommittedBuffer(memoryLocation, priority, bufferDesc, buffer);
 }
 
 static Result NRI_CALL CreateCommittedTexture(Device& device, MemoryLocation memoryLocation, float priority, const TextureDesc& textureDesc, Texture*& texture) {
-    DeviceD3D12& deviceD3D12 = (DeviceD3D12&)device;
-
-    Result result = deviceD3D12.CreateImplementation<TextureD3D12>(texture, textureDesc);
-    if (result != Result::SUCCESS)
-        return result;
-
-    return ((TextureD3D12*)texture)->Allocate(memoryLocation, priority, true);
+    return ((DeviceD3D12&)device).CreateCommittedTexture(memoryLocation, priority, textureDesc, texture);
 }
 
 static Result NRI_CALL CreatePlacedBuffer(Device& device, Memory* memory, uint64_t offset, const BufferDesc& bufferDesc, Buffer*& buffer) {
-    DeviceD3D12& deviceD3D12 = (DeviceD3D12&)device;
-
-    Result result = deviceD3D12.CreateImplementation<BufferD3D12>(buffer, bufferDesc);
-    if (result != Result::SUCCESS)
-        return result;
-
-    if (memory)
-        result = ((BufferD3D12*)buffer)->BindMemory(*(MemoryD3D12*)memory, offset);
-    else
-        result = ((BufferD3D12*)buffer)->Allocate((MemoryLocation)offset, 0.0f, false);
-
-    return result;
+    return ((DeviceD3D12&)device).CreatePlacedBuffer(memory, offset, bufferDesc, buffer);
 }
 
 static Result NRI_CALL CreatePlacedTexture(Device& device, Memory* memory, uint64_t offset, const TextureDesc& textureDesc, Texture*& texture) {
-    DeviceD3D12& deviceD3D12 = (DeviceD3D12&)device;
-
-    Result result = deviceD3D12.CreateImplementation<TextureD3D12>(texture, textureDesc);
-    if (result != Result::SUCCESS)
-        return result;
-
-    if (memory)
-        result = ((TextureD3D12*)texture)->BindMemory(*(MemoryD3D12*)memory, offset);
-    else
-        result = ((TextureD3D12*)texture)->Allocate((MemoryLocation)offset, 0.0f, false);
-
-    return result;
+    return ((DeviceD3D12&)device).CreatePlacedTexture(memory, offset, textureDesc, texture);
 }
 
 static Result NRI_CALL AllocateDescriptorSets(DescriptorPool& descriptorPool, const PipelineLayout& pipelineLayout, uint32_t setIndex, DescriptorSet** descriptorSets, uint32_t instanceNum, uint32_t variableDescriptorNum) {
@@ -636,6 +593,18 @@ static uint64_t NRI_CALL GetDescriptorNativeObject(const Descriptor* descriptor)
     return uint64_t(((DescriptorD3D12*)descriptor)->GetDescriptorHandleCPU());
 }
 
+static Result NRI_CALL GetBufferSharedHandle(const Buffer& buffer, SharedHandle& sharedHandle) {
+    return ((const BufferD3D12&)buffer).GetSharedHandle(sharedHandle);
+}
+
+static Result NRI_CALL GetTextureSharedHandle(const Texture& texture, SharedHandle& sharedHandle) {
+    return ((const TextureD3D12&)texture).GetSharedHandle(sharedHandle);
+}
+
+static Result NRI_CALL GetFenceSharedHandle(const Fence& fence, SharedHandle& sharedHandle) {
+    return ((const FenceD3D12&)fence).GetSharedHandle(sharedHandle);
+}
+
 Result DeviceD3D12::FillFunctionTable(CoreInterface& table) const {
     table.GetDeviceDesc = ::GetDeviceDesc;
     table.GetBufferDesc = ::GetBufferDesc;
@@ -751,6 +720,10 @@ Result DeviceD3D12::FillFunctionTable(CoreInterface& table) const {
     table.GetBufferNativeObject = ::GetBufferNativeObject;
     table.GetTextureNativeObject = ::GetTextureNativeObject;
     table.GetDescriptorNativeObject = ::GetDescriptorNativeObject;
+    table.GetBufferSharedHandle = ::GetBufferSharedHandle;
+    table.GetTextureSharedHandle = ::GetTextureSharedHandle;
+    table.GetFenceSharedHandle = ::GetFenceSharedHandle;
+    table.DestroySharedHandle = DestroySharedHandle;
 
     return Result::SUCCESS;
 }
@@ -844,16 +817,8 @@ Result DeviceD3D12::FillFunctionTable(HelperInterface& table) const {
 
 static Result NRI_CALL CreateImgui(Device& device, const ImguiDesc& imguiDesc, Imgui*& imgui) {
     DeviceD3D12& deviceD3D12 = (DeviceD3D12&)device;
-    ImguiImpl* impl = Allocate<ImguiImpl>(deviceD3D12.GetAllocationCallbacks(), device, deviceD3D12.GetCoreInterface());
-    Result result = impl->Create(imguiDesc);
 
-    if (result != Result::SUCCESS) {
-        Destroy(impl);
-        imgui = nullptr;
-    } else
-        imgui = (Imgui*)impl;
-
-    return result;
+    return CreateImplementation(deviceD3D12.GetAllocationCallbacks(), imgui, Allocate<ImguiImpl>(deviceD3D12.GetAllocationCallbacks(), device, deviceD3D12.GetCoreInterface()), imguiDesc);
 }
 
 static void NRI_CALL DestroyImgui(Imgui* imgui) {
@@ -1039,53 +1004,19 @@ static void NRI_CALL GetMicromapMemoryDesc2(const Device& device, const Micromap
 }
 
 static Result NRI_CALL CreateCommittedAccelerationStructure(Device& device, MemoryLocation memoryLocation, float priority, const AccelerationStructureDesc& accelerationStructureDesc, AccelerationStructure*& accelerationStructure) {
-    DeviceD3D12& deviceD3D12 = (DeviceD3D12&)device;
-
-    Result result = deviceD3D12.CreateImplementation<AccelerationStructureD3D12>(accelerationStructure, accelerationStructureDesc);
-    if (result != Result::SUCCESS)
-        return result;
-
-    return ((AccelerationStructureD3D12*)accelerationStructure)->Allocate(memoryLocation, priority, true);
+    return ((DeviceD3D12&)device).CreateCommittedAccelerationStructure(memoryLocation, priority, accelerationStructureDesc, accelerationStructure);
 }
 
 static Result NRI_CALL CreateCommittedMicromap(Device& device, MemoryLocation memoryLocation, float priority, const MicromapDesc& micromapDesc, Micromap*& micromap) {
-    DeviceD3D12& deviceD3D12 = (DeviceD3D12&)device;
-
-    Result result = deviceD3D12.CreateImplementation<MicromapD3D12>(micromap, micromapDesc);
-    if (result != Result::SUCCESS)
-        return result;
-
-    return ((MicromapD3D12*)micromap)->Allocate(memoryLocation, priority, true);
+    return ((DeviceD3D12&)device).CreateCommittedMicromap(memoryLocation, priority, micromapDesc, micromap);
 }
 
 static Result NRI_CALL CreatePlacedAccelerationStructure(Device& device, Memory* memory, uint64_t offset, const AccelerationStructureDesc& accelerationStructureDesc, AccelerationStructure*& accelerationStructure) {
-    DeviceD3D12& deviceD3D12 = (DeviceD3D12&)device;
-
-    Result result = deviceD3D12.CreateImplementation<AccelerationStructureD3D12>(accelerationStructure, accelerationStructureDesc);
-    if (result != Result::SUCCESS)
-        return result;
-
-    if (memory)
-        result = ((AccelerationStructureD3D12*)accelerationStructure)->BindMemory(*(MemoryD3D12*)memory, offset);
-    else
-        result = ((AccelerationStructureD3D12*)accelerationStructure)->Allocate((MemoryLocation)offset, 0.0f, false);
-
-    return result;
+    return ((DeviceD3D12&)device).CreatePlacedAccelerationStructure(memory, offset, accelerationStructureDesc, accelerationStructure);
 }
 
 static Result NRI_CALL CreatePlacedMicromap(Device& device, Memory* memory, uint64_t offset, const MicromapDesc& micromapDesc, Micromap*& micromap) {
-    DeviceD3D12& deviceD3D12 = (DeviceD3D12&)device;
-
-    Result result = deviceD3D12.CreateImplementation<MicromapD3D12>(micromap, micromapDesc);
-    if (result != Result::SUCCESS)
-        return result;
-
-    if (memory)
-        result = ((MicromapD3D12*)micromap)->BindMemory(*(MemoryD3D12*)memory, offset);
-    else
-        result = ((MicromapD3D12*)micromap)->Allocate((MemoryLocation)offset, 0.0f, false);
-
-    return result;
+    return ((DeviceD3D12&)device).CreatePlacedMicromap(memory, offset, micromapDesc, micromap);
 }
 
 static Result NRI_CALL WriteShaderGroupIdentifiers(const Pipeline& pipeline, uint32_t baseShaderGroupIndex, uint32_t shaderGroupNum, uint32_t dstStride, void* dst) {
@@ -1205,7 +1136,8 @@ static void NRI_CALL DestroyVideoSession(VideoSession* videoSession) {
     Destroy((VideoSessionD3D12*)videoSession);
 }
 
-static void NRI_CALL ResetVideoSession(VideoSession&) {
+static void NRI_CALL ResetVideoSession(VideoSession& videoSession) {
+    ((VideoSessionD3D12&)videoSession).Reset();
 }
 
 static Result NRI_CALL CreateVideoSessionParameters(Device& device, const VideoSessionParametersDesc& videoSessionParametersDesc, VideoSessionParameters*& videoSessionParameters) {
@@ -1271,8 +1203,8 @@ static Result NRI_CALL GetVideoEncodeFeedback(VideoSession&, Buffer& resolvedMet
     return GetVideoEncodeFeedback((BufferD3D12&)resolvedMetadataReadback, resolvedMetadataOffset, feedback);
 }
 
-static Result NRI_CALL GetVideoAV1EncodeDecodeInfo(VideoSession&, Buffer& resolvedMetadataReadback, uint64_t resolvedMetadataOffset, const VideoAV1EncodeDecodeInfoDesc& desc, VideoAV1EncodeDecodeInfo& info) {
-    return GetVideoAV1EncodeDecodeInfo((BufferD3D12&)resolvedMetadataReadback, resolvedMetadataOffset, desc, info);
+static Result NRI_CALL GetVideoAV1EncodeDecodeInfo(VideoSession& videoSession, Buffer& resolvedMetadataReadback, uint64_t resolvedMetadataOffset, const VideoAV1EncodeDecodeInfoDesc& desc, VideoAV1EncodeDecodeInfo& info) {
+    return GetVideoAV1EncodeDecodeInfo((VideoSessionD3D12&)videoSession, (BufferD3D12&)resolvedMetadataReadback, resolvedMetadataOffset, desc, info);
 }
 
 Result DeviceD3D12::FillFunctionTable(VideoInterface& table) const {
@@ -1308,16 +1240,8 @@ Result DeviceD3D12::FillFunctionTable(VideoInterface& table) const {
 
 static Result NRI_CALL CreateStreamer(Device& device, const StreamerDesc& streamerDesc, Streamer*& streamer) {
     DeviceD3D12& deviceD3D12 = (DeviceD3D12&)device;
-    StreamerImpl* impl = Allocate<StreamerImpl>(deviceD3D12.GetAllocationCallbacks(), device, deviceD3D12.GetCoreInterface());
-    Result result = impl->Create(streamerDesc);
 
-    if (result != Result::SUCCESS) {
-        Destroy(impl);
-        streamer = nullptr;
-    } else
-        streamer = (Streamer*)impl;
-
-    return result;
+    return CreateImplementation(deviceD3D12.GetAllocationCallbacks(), streamer, Allocate<StreamerImpl>(deviceD3D12.GetAllocationCallbacks(), device, deviceD3D12.GetCoreInterface()), streamerDesc);
 }
 
 static void NRI_CALL DestroyStreamer(Streamer* streamer) {
@@ -1426,16 +1350,8 @@ Result DeviceD3D12::FillFunctionTable(SwapChainInterface& table) const {
 
 static Result NRI_CALL CreateUpscaler(Device& device, const UpscalerDesc& upscalerDesc, Upscaler*& upscaler) {
     DeviceD3D12& deviceD3D12 = (DeviceD3D12&)device;
-    UpscalerImpl* impl = Allocate<UpscalerImpl>(deviceD3D12.GetAllocationCallbacks(), device, deviceD3D12.GetCoreInterface());
-    Result result = impl->Create(upscalerDesc);
 
-    if (result != Result::SUCCESS) {
-        Destroy(deviceD3D12.GetAllocationCallbacks(), impl);
-        upscaler = nullptr;
-    } else
-        upscaler = (Upscaler*)impl;
-
-    return result;
+    return CreateImplementation(deviceD3D12.GetAllocationCallbacks(), upscaler, Allocate<UpscalerImpl>(deviceD3D12.GetAllocationCallbacks(), device, deviceD3D12.GetCoreInterface()), upscalerDesc);
 }
 
 static void NRI_CALL DestroyUpscaler(Upscaler* upscaler) {

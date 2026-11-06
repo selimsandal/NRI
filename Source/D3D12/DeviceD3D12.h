@@ -2,12 +2,6 @@
 
 #pragma once
 
-#if NRI_ENABLE_AGILITY_SDK_SUPPORT
-typedef ID3D12Device15 ID3D12DeviceBest;
-#else
-typedef ID3D12Device8 ID3D12DeviceBest;
-#endif
-
 namespace nri {
 
 struct HostCopyLayoutD3D12 {
@@ -66,6 +60,10 @@ struct DeviceD3D12 final : public DeviceBase {
         return m_Version;
     }
 
+    inline bool HasNativeAsyncCommands() const {
+        return m_HasNativeAsyncCommands;
+    }
+
     inline bool HasNvExt() const {
 #if NRI_ENABLE_NVAPI
         return m_NvExt.available;
@@ -83,17 +81,8 @@ struct DeviceD3D12 final : public DeviceBase {
     }
 
     template <typename Implementation, typename Interface, typename... Args>
-    inline Result CreateImplementation(Interface*& entity, const Args&... args) {
-        Implementation* impl = Allocate<Implementation>(GetAllocationCallbacks(), *this);
-        Result result = impl->Create(args...);
-
-        if (result != Result::SUCCESS) {
-            Destroy(GetAllocationCallbacks(), impl);
-            entity = nullptr;
-        } else
-            entity = (Interface*)impl;
-
-        return result;
+    [[nodiscard]] inline Result CreateImplementation(Interface*& entity, Args&&... args) {
+        return nri::CreateImplementation(GetAllocationCallbacks(), entity, Allocate<Implementation>(GetAllocationCallbacks(), *this), std::forward<Args>(args)...);
     }
 
     Result Create(const DeviceCreationDesc& deviceCreationDesc, const DeviceCreationD3D12Desc& deviceCreationD3D12Desc);
@@ -151,6 +140,14 @@ struct DeviceD3D12 final : public DeviceBase {
     // NRI
     //================================================================================================================
 
+    Result CreateCommittedBuffer(MemoryLocation memoryLocation, float priority, const BufferDesc& bufferDesc, Buffer*& buffer);
+    Result CreateCommittedTexture(MemoryLocation memoryLocation, float priority, const TextureDesc& textureDesc, Texture*& texture);
+    Result CreatePlacedBuffer(Memory* memory, uint64_t offset, const BufferDesc& bufferDesc, Buffer*& buffer);
+    Result CreatePlacedTexture(Memory* memory, uint64_t offset, const TextureDesc& textureDesc, Texture*& texture);
+    Result CreateCommittedAccelerationStructure(MemoryLocation memoryLocation, float priority, const AccelerationStructureDesc& accelerationStructureDesc, AccelerationStructure*& accelerationStructure);
+    Result CreateCommittedMicromap(MemoryLocation memoryLocation, float priority, const MicromapDesc& micromapDesc, Micromap*& micromap);
+    Result CreatePlacedAccelerationStructure(Memory* memory, uint64_t offset, const AccelerationStructureDesc& accelerationStructureDesc, AccelerationStructure*& accelerationStructure);
+    Result CreatePlacedMicromap(Memory* memory, uint64_t offset, const MicromapDesc& micromapDesc, Micromap*& micromap);
     Result GetQueue(QueueType queueType, uint32_t queueIndex, Queue*& queue);
     Result WaitIdle();
     Result UploadHostMemoryToTexture(QueueD3D12& queue, const UploadHostMemoryToTextureDesc* copyDescs, uint32_t copyDescNum);
@@ -163,6 +160,7 @@ private:
     HostCopyLayoutD3D12 GetHostCopyLayout(const TextureD3D12& texture, const TextureRegionDesc& region, uint64_t& offset) const;
     Result AcquireTransferContext(QueueD3D12& queue, TransferContextD3D12*& context);
     void ReleaseTransferContext(TransferContextD3D12& context);
+    HRESULT CheckFeatureSupport(D3D12_FEATURE feature, void* data, uint32_t size) const;
     HRESULT CreateVma();
     void FillDesc(bool disableD3D12EnhancedBarrier);
     void InitializeNvExt(bool disableNVAPIInitialization, bool isImported);
@@ -203,6 +201,7 @@ private:
     uint8_t m_Version = 0;
     bool m_IsWrapped = false;
     bool m_IsMemoryZeroInitializationEnabled = false;
+    bool m_HasNativeAsyncCommands = false;
 
     std::array<Lock, D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES> m_FreeDescriptorLocks;
     Lock m_DescriptorHeapLock;

@@ -199,18 +199,17 @@ struct DeviceVK final : public DeviceBase {
         return m_Vma;
     }
 
+    inline StageBits GetSupportedShaderStages() const {
+        return m_SupportedShaderStages;
+    }
+
+    inline VkPipelineStageFlags2 GetUnsupportedPipelineStages() const {
+        return m_UnsupportedPipelineStages;
+    }
+
     template <typename Implementation, typename Interface, typename... Args>
-    inline Result CreateImplementation(Interface*& entity, const Args&... args) {
-        Implementation* impl = Allocate<Implementation>(GetAllocationCallbacks(), *this);
-        Result result = impl->Create(args...);
-
-        if (result != Result::SUCCESS) {
-            Destroy(GetAllocationCallbacks(), impl);
-            entity = nullptr;
-        } else
-            entity = (Interface*)impl;
-
-        return result;
+    [[nodiscard]] inline Result CreateImplementation(Interface*& entity, Args&&... args) {
+        return nri::CreateImplementation(GetAllocationCallbacks(), entity, Allocate<Implementation>(GetAllocationCallbacks(), *this), std::forward<Args>(args)...);
     }
 
     DeviceVK(const CallbackInterface& callbacks, const AllocationCallbacks& allocationCallbacks);
@@ -220,7 +219,12 @@ struct DeviceVK final : public DeviceBase {
     VkRenderPass GetOrCreateRenderPass(const RenderPassDesc& desc);
     VkFramebuffer GetOrCreateFramebuffer(const FramebufferDesc& desc);
     void FillCreateInfo(const BufferDesc& bufferDesc, VkBufferCreateInfo& info) const;
+    bool IsSharedFenceSupported(VkSemaphoreType type) const;
+    Result AllocateSharedMemory(const MemoryDesc& memoryDesc, float priority, VkBuffer buffer, VkImage image, VkDeviceMemory& memory);
+    Result GetSharedMemoryHandle(VkDeviceMemory memory, uint64_t size, void*& exportedHandle, SharedHandle& sharedHandle);
+    Result GetSharedSemaphoreHandle(VkSemaphore semaphore, void*& exportedHandle, SharedHandle& sharedHandle);
     void FillCreateInfo(const TextureDesc& bufferDesc, VkImageCreateInfo& info) const;
+    void AppendVideoProfileList(const TextureDesc& textureDesc, VkImageCreateInfo& info, VideoResourceProfileListVK& videoProfiles) const; // "videoProfiles" must outlive "info"
     void FillCreateInfo(const SamplerDesc& samplerDesc, VkSamplerCreateInfo& info, VkSamplerReductionModeCreateInfo& reductionModeInfo, VkSamplerCustomBorderColorCreateInfoEXT& borderColorInfo) const;
     void GetMemoryDesc2(const BufferDesc& bufferDesc, MemoryLocation memoryLocation, MemoryDesc& memoryDesc) const;
     void GetMemoryDesc2(const TextureDesc& textureDesc, MemoryLocation memoryLocation, MemoryDesc& memoryDesc) const;
@@ -271,6 +275,14 @@ struct DeviceVK final : public DeviceBase {
 
     void CopyDescriptorRanges(const CopyDescriptorRangeDesc* copyDescriptorRangeDescs, uint32_t copyDescriptorRangeDescNum);
     void UpdateDescriptorRanges(const UpdateDescriptorRangeDesc* updateDescriptorRangeDescs, uint32_t updateDescriptorRangeDescNum);
+    Result CreateCommittedBuffer(MemoryLocation memoryLocation, float priority, const BufferDesc& bufferDesc, Buffer*& buffer);
+    Result CreateCommittedTexture(MemoryLocation memoryLocation, float priority, const TextureDesc& textureDesc, Texture*& texture);
+    Result CreatePlacedBuffer(Memory* memory, uint64_t offset, const BufferDesc& bufferDesc, Buffer*& buffer);
+    Result CreatePlacedTexture(Memory* memory, uint64_t offset, const TextureDesc& textureDesc, Texture*& texture);
+    Result CreateCommittedAccelerationStructure(MemoryLocation memoryLocation, float priority, const AccelerationStructureDesc& accelerationStructureDesc, AccelerationStructure*& accelerationStructure);
+    Result CreateCommittedMicromap(MemoryLocation memoryLocation, float priority, const MicromapDesc& micromapDesc, Micromap*& micromap);
+    Result CreatePlacedAccelerationStructure(Memory* memory, uint64_t offset, const AccelerationStructureDesc& accelerationStructureDesc, AccelerationStructure*& accelerationStructure);
+    Result CreatePlacedMicromap(Memory* memory, uint64_t offset, const MicromapDesc& micromapDesc, Micromap*& micromap);
     Result GetQueue(QueueType queueType, uint32_t queueIndex, Queue*& queue);
     VkVideoCodecOperationFlagsKHR GetVideoCodecOperations(bool decode, bool encode) const;
     Result WaitIdle();
@@ -292,7 +304,7 @@ private:
     void ProcessInstanceExtensions(Vector<const char*>& desiredInstanceExts);
     void ProcessDeviceExtensions(Vector<const char*>& desiredDeviceExts, bool disableRayTracing, DeviceLostInfoLevel deviceLostInfoLevel);
     void ReportMemoryTypes();
-    Result CreateInstance(bool enableGraphicsAPIValidation, const Vector<const char*>& desiredInstanceExts);
+    Result CreateInstance(bool enableGraphicsAPIValidation, const Vector<const char*>& desiredInstanceExts, const void* instanceCreateInfoNext);
     Result ResolvePreInstanceDispatchTable();
     Result ResolveInstanceDispatchTable(const Vector<const char*>& desiredInstanceExts);
     Result ResolveDispatchTable(const Vector<const char*>& desiredDeviceExts);
@@ -325,9 +337,12 @@ private:
     VkDebugUtilsMessengerEXT m_Messenger = VK_NULL_HANDLE;
     VmaAllocator_T* m_Vma = nullptr;
     uint32_t m_NumActiveFamilyIndices = 0;
+    uint32_t m_InstanceVersion = 0;
     uint32_t m_MinorVersion = 0;
     VkTimeDomainKHR m_CalibratedTimestampCPUTimeDomain = VK_TIME_DOMAIN_DEVICE_KHR;
     uint64_t m_NonCoherentAtomSize = 1;
+    VkPipelineStageFlags2 m_UnsupportedPipelineStages = 0;
+    StageBits m_SupportedShaderStages = StageBits::ALL_SHADERS;
     DeviceLostDump m_DeviceLostDump = {};
     bool m_OwnsNativeObjects = true;
     bool m_IsMemoryZeroInitializationEnabled = false;
@@ -336,6 +351,7 @@ private:
     Lock m_Lock;
     Lock m_TransferContextLock;
     Lock m_DeviceLostLock;
+    Lock m_SharedHandleLock;
 };
 
 } // namespace nri

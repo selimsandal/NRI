@@ -70,6 +70,24 @@ constexpr VkVideoCodecOperationFlagsKHR VIDEO_ENCODE_CODEC_OPERATION_MASK = 0xFF
 constexpr VkVideoEncodeFeedbackFlagsKHR VIDEO_ENCODE_REQUIRED_FEEDBACK_FLAGS = VK_VIDEO_ENCODE_FEEDBACK_BITSTREAM_BUFFER_OFFSET_BIT_KHR | VK_VIDEO_ENCODE_FEEDBACK_BITSTREAM_BYTES_WRITTEN_BIT_KHR;
 constexpr uint32_t VIDEO_ENCODE_FEEDBACK_QUERY_NUM = 64;
 
+static inline void CloseSharedHandle(void*& exportedHandle) {
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+    if (exportedHandle) {
+        CloseHandle((HANDLE)exportedHandle);
+        exportedHandle = nullptr;
+    }
+#else
+    MaybeUnused(exportedHandle);
+#endif
+}
+
+static constexpr bool IsVideoOnly(const BufferDesc& bufferDesc) {
+    constexpr uint32_t videoUsageMask = (uint32_t)BufferUsageBits::VIDEO_DECODE | (uint32_t)BufferUsageBits::VIDEO_ENCODE;
+    const uint32_t usageMask = (uint32_t)bufferDesc.usage;
+
+    return (usageMask & videoUsageMask) != 0 && (usageMask & ~videoUsageMask) == 0;
+}
+
 struct MemoryTypeInfo {
     MemoryTypeIndex index;
     MemoryLocation location;
@@ -132,7 +150,7 @@ struct VideoResourceProfileListVK {
         return true;
     }
 
-    void Fill(bool decode, bool encode, Format format, VideoCodec codec, VkVideoCodecOperationFlagsKHR codecOperations) {
+    void Fill(bool decode, bool encode, Format format, VideoCodec codec, bool av1FilmGrain, VkVideoCodecOperationFlagsKHR codecOperations) {
         list.profileCount = 0;
         list.pProfiles = profiles.data();
 
@@ -143,7 +161,7 @@ struct VideoResourceProfileListVK {
             decodeH264.pictureLayout = VK_VIDEO_DECODE_H264_PICTURE_LAYOUT_PROGRESSIVE_KHR;
             decodeH265.stdProfileIdc = bitDepth == VK_VIDEO_COMPONENT_BIT_DEPTH_10_BIT_KHR ? STD_VIDEO_H265_PROFILE_IDC_MAIN_10 : STD_VIDEO_H265_PROFILE_IDC_MAIN;
             decodeAV1.stdProfile = STD_VIDEO_AV1_PROFILE_MAIN;
-            decodeAV1.filmGrainSupport = VK_FALSE;
+            decodeAV1.filmGrainSupport = av1FilmGrain ? VK_TRUE : VK_FALSE;
 
             decodeUsage[0] = {VK_STRUCTURE_TYPE_VIDEO_DECODE_USAGE_INFO_KHR};
             decodeUsage[0].videoUsageHints = VK_VIDEO_DECODE_USAGE_DEFAULT_KHR;
@@ -193,6 +211,15 @@ struct VideoResourceProfileListVK {
         }
     }
 };
+
+// Shared handles: the one handle type of the platform
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+constexpr VkExternalMemoryHandleTypeFlagBits SHARED_MEMORY_HANDLE_TYPE = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+constexpr VkExternalSemaphoreHandleTypeFlagBits SHARED_SEMAPHORE_HANDLE_TYPE = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+#else
+constexpr VkExternalMemoryHandleTypeFlagBits SHARED_MEMORY_HANDLE_TYPE = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+constexpr VkExternalSemaphoreHandleTypeFlagBits SHARED_SEMAPHORE_HANDLE_TYPE = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+#endif
 
 } // namespace nri
 

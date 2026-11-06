@@ -47,16 +47,7 @@ using namespace nri;
 #include "TextureD3D11.hpp"
 
 Result CreateDeviceD3D11(const DeviceCreationDesc& desc, const DeviceCreationD3D11Desc& descD3D11, DeviceBase*& device) {
-    DeviceD3D11* impl = Allocate<DeviceD3D11>(desc.allocationCallbacks, desc.callbackInterface, desc.allocationCallbacks);
-    Result result = impl->Create(desc, descD3D11);
-
-    if (result != Result::SUCCESS) {
-        Destroy(desc.allocationCallbacks, impl);
-        device = nullptr;
-    } else
-        device = (DeviceBase*)impl;
-
-    return result;
+    return CreateImplementation(desc.allocationCallbacks, device, Allocate<DeviceD3D11>(desc.allocationCallbacks, desc.callbackInterface, desc.allocationCallbacks), desc, descD3D11);
 }
 
 //============================================================================================================================================================================================
@@ -86,15 +77,18 @@ static Result NRI_CALL CreateCommandAllocator(Queue& queue, CommandAllocator*& c
     DeviceD3D11& device = ((QueueD3D11&)queue).GetDevice();
     commandAllocator = (CommandAllocator*)Allocate<CommandAllocatorD3D11>(device.GetAllocationCallbacks(), device);
 
-    return Result::SUCCESS;
+    return commandAllocator ? Result::SUCCESS : Result::OUT_OF_MEMORY;
 }
 
 static Result NRI_CALL CreateCommandBuffer(CommandAllocator& commandAllocator, CommandBuffer*& commandBuffer) {
     return ((CommandAllocatorD3D11&)commandAllocator).CreateCommandBuffer(commandBuffer);
 }
 
-static Result NRI_CALL CreateFence(Device& device, uint64_t initialValue, Fence*& fence) {
-    return ((DeviceD3D11&)device).CreateImplementation<FenceD3D11>(fence, initialValue);
+static Result NRI_CALL CreateFence(Device& device, const FenceDesc& fenceDesc, Fence*& fence) {
+    if (fenceDesc.shared)
+        return Result::UNSUPPORTED;
+
+    return ((DeviceD3D11&)device).CreateImplementation<FenceD3D11>(fence, fenceDesc.initialValue);
 }
 
 static Result NRI_CALL CreateDescriptorPool(Device& device, const DescriptorPoolDesc& descriptorPoolDesc, DescriptorPool*& descriptorPool) {
@@ -230,41 +224,19 @@ static void NRI_CALL GetTextureMemoryDesc2(const Device& device, const TextureDe
 }
 
 static Result NRI_CALL CreateCommittedBuffer(Device& device, MemoryLocation memoryLocation, float priority, const BufferDesc& bufferDesc, Buffer*& buffer) {
-    Result result = ((DeviceD3D11&)device).CreateImplementation<BufferD3D11>(buffer, bufferDesc);
-    if (result == Result::SUCCESS)
-        result = ((BufferD3D11*)buffer)->Allocate(memoryLocation, priority);
-
-    return result;
+    return ((DeviceD3D11&)device).CreateCommittedBuffer(memoryLocation, priority, bufferDesc, buffer);
 }
 
 static Result NRI_CALL CreateCommittedTexture(Device& device, MemoryLocation memoryLocation, float priority, const TextureDesc& textureDesc, Texture*& texture) {
-    Result result = ((DeviceD3D11&)device).CreateImplementation<TextureD3D11>(texture, textureDesc);
-    if (result == Result::SUCCESS)
-        result = ((TextureD3D11*)texture)->Allocate(memoryLocation, priority);
-
-    return result;
+    return ((DeviceD3D11&)device).CreateCommittedTexture(memoryLocation, priority, textureDesc, texture);
 }
 
 static Result NRI_CALL CreatePlacedBuffer(Device& device, Memory* memory, uint64_t offset, const BufferDesc& bufferDesc, Buffer*& buffer) {
-    MemoryLocation memoryLocation = (MemoryLocation)offset;
-    float priority = 0.0f;
-    if (memory) {
-        memoryLocation = ((MemoryD3D11*)memory)->GetLocation();
-        priority = ((MemoryD3D11*)memory)->GetPriority();
-    }
-
-    return CreateCommittedBuffer(device, memoryLocation, priority, bufferDesc, buffer);
+    return ((DeviceD3D11&)device).CreatePlacedBuffer(memory, offset, bufferDesc, buffer);
 }
 
 static Result NRI_CALL CreatePlacedTexture(Device& device, Memory* memory, uint64_t offset, const TextureDesc& textureDesc, Texture*& texture) {
-    MemoryLocation memoryLocation = (MemoryLocation)offset;
-    float priority = 0.0f;
-    if (memory) {
-        memoryLocation = ((MemoryD3D11*)memory)->GetLocation();
-        priority = ((MemoryD3D11*)memory)->GetPriority();
-    }
-
-    return CreateCommittedTexture(device, memoryLocation, priority, textureDesc, texture);
+    return ((DeviceD3D11&)device).CreatePlacedTexture(memory, offset, textureDesc, texture);
 }
 
 static Result NRI_CALL AllocateDescriptorSets(DescriptorPool& descriptorPool, const PipelineLayout& pipelineLayout, uint32_t setIndex, DescriptorSet** descriptorSets, uint32_t instanceNum, uint32_t variableDescriptorNum) {
@@ -765,6 +737,24 @@ static void* NRI_CALL EmuGetCommandBufferNativeObject(const CommandBuffer* comma
     return commandBufferBase->GetNativeObject();
 }
 
+static Result NRI_CALL GetBufferSharedHandle(const Buffer&, SharedHandle& sharedHandle) {
+    sharedHandle = {};
+
+    return Result::UNSUPPORTED;
+}
+
+static Result NRI_CALL GetTextureSharedHandle(const Texture&, SharedHandle& sharedHandle) {
+    sharedHandle = {};
+
+    return Result::UNSUPPORTED;
+}
+
+static Result NRI_CALL GetFenceSharedHandle(const Fence&, SharedHandle& sharedHandle) {
+    sharedHandle = {};
+
+    return Result::UNSUPPORTED;
+}
+
 Result DeviceD3D11::FillFunctionTable(CoreInterface& table) const {
     table.GetDeviceDesc = ::GetDeviceDesc;
     table.GetBufferDesc = ::GetBufferDesc;
@@ -837,6 +827,10 @@ Result DeviceD3D11::FillFunctionTable(CoreInterface& table) const {
     table.GetBufferNativeObject = ::GetBufferNativeObject;
     table.GetTextureNativeObject = ::GetTextureNativeObject;
     table.GetDescriptorNativeObject = ::GetDescriptorNativeObject;
+    table.GetBufferSharedHandle = ::GetBufferSharedHandle;
+    table.GetTextureSharedHandle = ::GetTextureSharedHandle;
+    table.GetFenceSharedHandle = ::GetFenceSharedHandle;
+    table.DestroySharedHandle = DestroySharedHandle;
 
     if (m_IsDeferredContextEmulated) {
         table.BeginCommandBuffer = ::EmuBeginCommandBuffer;
@@ -982,16 +976,8 @@ Result DeviceD3D11::FillFunctionTable(HelperInterface& table) const {
 
 static Result NRI_CALL CreateImgui(Device& device, const ImguiDesc& imguiDesc, Imgui*& imgui) {
     DeviceD3D11& deviceD3D11 = (DeviceD3D11&)device;
-    ImguiImpl* impl = Allocate<ImguiImpl>(deviceD3D11.GetAllocationCallbacks(), device, deviceD3D11.GetCoreInterface());
-    Result result = impl->Create(imguiDesc);
 
-    if (result != Result::SUCCESS) {
-        Destroy(impl);
-        imgui = nullptr;
-    } else
-        imgui = (Imgui*)impl;
-
-    return result;
+    return CreateImplementation(deviceD3D11.GetAllocationCallbacks(), imgui, Allocate<ImguiImpl>(deviceD3D11.GetAllocationCallbacks(), device, deviceD3D11.GetCoreInterface()), imguiDesc);
 }
 
 static void NRI_CALL DestroyImgui(Imgui* imgui) {
@@ -1061,16 +1047,8 @@ Result DeviceD3D11::FillFunctionTable(LowLatencyInterface& table) const {
 
 static Result NRI_CALL CreateStreamer(Device& device, const StreamerDesc& streamerDesc, Streamer*& streamer) {
     DeviceD3D11& deviceD3D11 = (DeviceD3D11&)device;
-    StreamerImpl* impl = Allocate<StreamerImpl>(deviceD3D11.GetAllocationCallbacks(), device, deviceD3D11.GetCoreInterface());
-    Result result = impl->Create(streamerDesc);
 
-    if (result != Result::SUCCESS) {
-        Destroy(impl);
-        streamer = nullptr;
-    } else
-        streamer = (Streamer*)impl;
-
-    return result;
+    return CreateImplementation(deviceD3D11.GetAllocationCallbacks(), streamer, Allocate<StreamerImpl>(deviceD3D11.GetAllocationCallbacks(), device, deviceD3D11.GetCoreInterface()), streamerDesc);
 }
 
 static void NRI_CALL DestroyStreamer(Streamer* streamer) {
@@ -1179,16 +1157,8 @@ Result DeviceD3D11::FillFunctionTable(SwapChainInterface& table) const {
 
 static Result NRI_CALL CreateUpscaler(Device& device, const UpscalerDesc& upscalerDesc, Upscaler*& upscaler) {
     DeviceD3D11& deviceD3D11 = (DeviceD3D11&)device;
-    UpscalerImpl* impl = Allocate<UpscalerImpl>(deviceD3D11.GetAllocationCallbacks(), device, deviceD3D11.GetCoreInterface());
-    Result result = impl->Create(upscalerDesc);
 
-    if (result != Result::SUCCESS) {
-        Destroy(impl);
-        upscaler = nullptr;
-    } else
-        upscaler = (Upscaler*)impl;
-
-    return result;
+    return CreateImplementation(deviceD3D11.GetAllocationCallbacks(), upscaler, Allocate<UpscalerImpl>(deviceD3D11.GetAllocationCallbacks(), device, deviceD3D11.GetCoreInterface()), upscalerDesc);
 }
 
 static void NRI_CALL DestroyUpscaler(Upscaler* upscaler) {

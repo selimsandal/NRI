@@ -11,11 +11,12 @@ TransferContextVK::~TransferContextVK() {
 Result TransferContextVK::Create(QueueVK& queue) {
     m_FamilyIndex = queue.GetFamilyIndex();
 
-    Result result = m_Device.CreateImplementation<FenceVK>(m_Fence, 0);
-    if (result != Result::SUCCESS)
-        return result;
+    FenceDesc fenceDesc = {};
+    Result result = m_Device.CreateImplementation<FenceVK>(m_Fence, fenceDesc);
 
-    result = m_Device.CreateImplementation<CommandAllocatorVK>(m_CommandAllocator, (Queue&)queue);
+    if (result == Result::SUCCESS)
+        result = m_Device.CreateImplementation<CommandAllocatorVK>(m_CommandAllocator, (Queue&)queue);
+
     if (result != Result::SUCCESS)
         return result;
 

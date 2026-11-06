@@ -1,6 +1,6 @@
 // © 2026 NVIDIA Corporation
 
-// Goal: backend-neutral hardware video encode/decode command submission
+// Hardware video encode/decode command submission
 // Video formats: https://learn.microsoft.com/en-us/windows/win32/medfound/recommended-8-bit-yuv-formats-for-video-rendering
 
 #pragma once
@@ -59,7 +59,7 @@ NriEnum(VideoPictureRole, uint8_t,
     DECODE_OUTPUT,             // distinct or output-only destination
     DECODE_REFERENCE,          // existing DPB picture read by the decode operation
     DECODE_SETUP,              // distinct reconstructed picture written into the DPB
-    DECODE_OUTPUT_AND_SETUP,   // coincident destination and reconstructed DPB picture
+    DECODE_OUTPUT_AND_SETUP,   // coincident destination and reconstructed DPB picture; incompatible with "VIDEO_OUTPUT_ONLY"
     ENCODE_INPUT,              // source picture read by the encode operation
     ENCODE_REFERENCE,          // existing DPB picture read by the encode operation
     ENCODE_RECONSTRUCTED       // reconstructed picture written into the DPB
@@ -85,7 +85,8 @@ NriBits(VideoH264SequenceParameterSetBits, uint16_t,
     DELTA_PIC_ORDER_ALWAYS_ZERO             = NriBit(9),
     SEPARATE_COLOUR_PLANE                   = NriBit(10),
     GAPS_IN_FRAME_NUM_ALLOWED               = NriBit(11),
-    QPPRIME_Y_ZERO_TRANSFORM_BYPASS         = NriBit(12)
+    QPPRIME_Y_ZERO_TRANSFORM_BYPASS         = NriBit(12),
+    FRAME_CROPPING                          = NriBit(13)
 );
 
 NriBits(VideoH264PictureParameterSetBits, uint8_t,
@@ -109,7 +110,7 @@ NriBits(VideoH264DecodePictureBits, uint8_t,
     COMPLEMENTARY_FIELD_PAIR                = NriBit(5)
 );
 
-NriBits(VideoH264DecodeReferenceBits, uint8_t,
+NriBits(VideoH264DecodeReferenceBits, uint8_t,       // a frame reference sets neither or both of "TOP_FIELD" and "BOTTOM_FIELD"
     NONE                                    = 0,
     TOP_FIELD                               = NriBit(0),
     BOTTOM_FIELD                            = NriBit(1),
@@ -226,7 +227,7 @@ NriBits(VideoAV1SequenceBits, uint32_t,
     ENABLE_SUPERRES                         = NriBit(13),
     ENABLE_CDEF                             = NriBit(14),
     ENABLE_RESTORATION                      = NriBit(15),
-    FILM_GRAIN_PARAMS_PRESENT               = NriBit(16), // TODO: currently unsupported for decode
+    FILM_GRAIN_PARAMS_PRESENT               = NriBit(16),
     TIMING_INFO_PRESENT                     = NriBit(17),
     INITIAL_DISPLAY_DELAY_PRESENT           = NriBit(18),
     MONO_CHROME                             = NriBit(19),
@@ -267,7 +268,7 @@ NriBits(VideoAV1PictureBits, uint32_t,
     USES_CHROMA_LR                          = NriBit(27),
     SHOW_FRAME                              = NriBit(28),
     SHOWABLE_FRAME                          = NriBit(29),
-    APPLY_GRAIN                             = NriBit(30)  // TODO: currently unsupported for decode
+    APPLY_GRAIN                             = NriBit(30)  // decode: requires "VideoSessionDesc::av1FilmGrain"
 );
 
 NriStruct(VideoSessionDesc) {
@@ -277,6 +278,7 @@ NriStruct(VideoSessionDesc) {
     uint32_t width;
     uint32_t height;
     uint32_t maxReferenceNum;
+    bool av1FilmGrain; // AV1 decode: permits "APPLY_GRAIN"; textures require "TextureDesc::videoAV1FilmGrain"; UNSUPPORTED if unavailable
 };
 
 NriStruct(VideoCapabilities) {
@@ -289,23 +291,25 @@ NriStruct(VideoCapabilities) {
     uint32_t maxReferenceNum;
     uint32_t bitstreamOffsetAlignment;
     uint32_t bitstreamSizeAlignment;
-    uint64_t bitstreamSizeMax;
+    uint64_t bitstreamSizeMax;                   // maximum "bitstream.size" for decode and "dstBitstream.size" for encode
     uint32_t metadataOffsetAlignment;
     uint32_t resolvedMetadataOffsetAlignment;
     uint32_t encodeFeedbackMaxPendingNum;        // maximum per-session feedback ranges not yet consumed by "GetVideoEncodeFeedback"; reset by "ResetVideoSession"
-    uint64_t metadataSize;                       // minimum backend encode metadata range
-    uint64_t resolvedMetadataSize;               // minimum resolved metadata range
+    uint64_t metadataSize;                       // minimum "VideoEncodeDesc::metadata" range size in bytes
+    uint64_t resolvedMetadataSize;               // minimum "VideoEncodeDesc::resolvedMetadata" range size in bytes
     Nri(VideoDecodeBitstreamSourceBits) decodeBitstreamSourceMask;
     Nri(AccessStage) resolvedMetadataState;      // required state while the resolved metadata is written
     Nri(QueueType) resolvedMetadataQueueType;    // queue used by the operation that writes resolved metadata
     uint32_t dpbTextureArrayMinLayerNum;         // minimum layer count when "dpbTextureArrayRequired" is true
     bool decodeDpbAndOutputCoincide;             // decode output and reconstructed/DPB setup may use the same texture subresource
-    bool decodeDpbAndOutputDistinct;             // decode output and reconstructed/DPB setup may use different texture subresources
+    bool decodeDpbAndOutputDistinct;             // decode output and reconstructed/DPB setup may use different texture subresources (textures with the session extent)
+    bool decodeReferenceOnlyRequired;            // decode DPB pictures (setup and references) must use "VIDEO_REFERENCE_ONLY" textures, which only video decode can access
     bool dpbTextureArrayRequired;                // all decode or encode DPB pictures must use layers of one texture
     bool decodeNativeArgumentsSupported;
     bool encodeBitstreamRangeSizeSupported;      // if false, encode output ranges must extend to the end of the buffer
     bool encodeFeedbackSupported;
     bool encodeFeedbackResolveRequired;          // if true, call "CmdResolveVideoEncodeFeedback" after the encode
+    bool encodeReferenceCountOverrideSupported;  // H.264/H.265: if false, active L0 (P/B) and L1 (B) counts must match PPS defaults (1 per list for default H.265 parameters)
 };
 
 NriStruct(VideoAV1Capabilities) {
@@ -368,7 +372,7 @@ NriStruct(VideoPictureState) {
 NriStruct(VideoH264SequenceParameterSetDesc) {
     Nri(VideoH264SequenceParameterSetBits) flags;
     uint8_t profileIdc;
-    uint8_t levelIdc;
+    uint8_t levelIdc; // "level_idc" as coded in the bitstream: 10 times the level number (e.g. 41 = level 4.1), level 1b is not supported
     uint8_t chromaFormatIdc;
     uint8_t sequenceParameterSetId;
     uint8_t bitDepthLumaMinus8;
@@ -381,6 +385,10 @@ NriStruct(VideoH264SequenceParameterSetDesc) {
     uint8_t referenceFrameNum;
     uint16_t pictureWidthInMbsMinus1;
     uint16_t pictureHeightInMapUnitsMinus1;
+    uint16_t frameCropLeftOffset;   // used with "FRAME_CROPPING", in "CropUnitX" units (2 luma samples for 4:2:0)
+    uint16_t frameCropRightOffset;
+    uint16_t frameCropTopOffset;    // used with "FRAME_CROPPING", in "CropUnitY" units (2 luma samples for 4:2:0 progressive)
+    uint16_t frameCropBottomOffset;
 };
 
 NriStruct(VideoH264PictureParameterSetDesc) {
@@ -408,7 +416,7 @@ NriStruct(VideoH264SessionParametersDesc) {
 NriStruct(VideoH265ProfileTierLevelDesc) {
     Nri(VideoH265ProfileTierLevelBits) flags;
     uint8_t generalProfileIdc;
-    uint8_t generalLevelIdc;
+    uint8_t generalLevelIdc; // "general_level_idc" as coded in the bitstream: 30 times the level number (e.g. 120 = level 4)
 };
 
 NriStruct(VideoH265DecPicBufMgrDesc) {
@@ -633,7 +641,7 @@ NriStruct(VideoH265ReferenceDesc) {
     int32_t pictureOrderCount;
     uint8_t temporalLayer;
     Nri(VideoFrameType) frameType;
-    uint8_t longTerm;
+    uint8_t longTerm;  // decode only, encode supports short-term references only
     uint8_t listIndex;
 };
 
@@ -656,7 +664,7 @@ NriStruct(VideoEncodeRateControlDesc) {
     uint8_t qpI;
     uint8_t qpP;
     uint8_t qpB;
-    NriOptional uint8_t qpMin;
+    NriOptional uint8_t qpMin;          // CBR/VBR QP range (AV1: Q index); omitted bounds use the supported codec limits
     NriOptional uint8_t qpMax;
     uint32_t frameRateNumerator;
     uint32_t frameRateDenominator;
@@ -682,8 +690,14 @@ NriStruct(VideoH264EncodePictureDesc) {
     NriOptional uint32_t referenceNum;
 };
 
+NriStruct(VideoH265EncodePictureDesc) {
+    uint8_t videoParameterSetId;
+    uint8_t sequenceParameterSetId;
+    uint8_t pictureParameterSetId;
+};
+
 NriStruct(VideoAV1ReferenceDesc) {
-    Nri(VideoAV1ReferenceName) name; // NONE describes an AV1 DPB slot that is not mapped to a current-frame reference name
+    Nri(VideoAV1ReferenceName) name; // NONE: a valid reference frame map entry ("ref_frame_idx") not used by the current frame; decode requires the complete map
     uint8_t refFrameIndex;
     Nri(VideoFrameType) frameType;
     uint8_t orderHint;
@@ -696,7 +710,7 @@ NriStruct(VideoAV1TileLayoutDesc) {
     uint8_t columnNum;
     uint8_t rowNum;
     uint8_t tileSizeBytesMinus1;
-    uint8_t uniformSpacing;
+    uint8_t uniformSpacing;                                 // if set, omitted arrays are derived from the frame size
     uint16_t contextUpdateTileId;
     NriOptional const uint16_t* miColumnStarts;             // if provided, must include "columnNum + 1" entries
     NriOptional const uint16_t* miRowStarts;                // if provided, must include "rowNum + 1" entries
@@ -728,10 +742,10 @@ NriStruct(VideoAV1LoopFilterDesc) {
 };
 
 NriStruct(VideoAV1CdefDesc) {
-    uint8_t yPrimaryStrength[8];
-    uint8_t ySecondaryStrength[8];
-    uint8_t uvPrimaryStrength[8];
-    uint8_t uvSecondaryStrength[8];
+    uint8_t yPrimaryStrength[8];    // 0..15
+    uint8_t ySecondaryStrength[8];  // 0..3 as coded in "cdef_y_sec_strength" (3 represents strength 4)
+    uint8_t uvPrimaryStrength[8];   // 0..15
+    uint8_t uvSecondaryStrength[8]; // 0..3 as coded in "cdef_uv_sec_strength"
 };
 
 NriStruct(VideoAV1SegmentationDesc) {
@@ -783,6 +797,21 @@ NriStruct(VideoAV1FilmGrainDesc) {
     int16_t crOffset;
 };
 
+// State of a reference frame that later frame headers can depend on ("RefUpscaledWidth", "load_previous", "load_grain_params")
+NriStruct(VideoAV1SavedFrameState) {
+    Nri(VideoAV1LoopFilterDesc) loopFilter;     // "refDeltas" and "modeDeltas"
+    Nri(VideoAV1SegmentationDesc) segmentation; // "FeatureEnabled" and "FeatureData"
+    Nri(VideoAV1GlobalMotionDesc) globalMotion; // "gm_params"
+    Nri(VideoAV1FilmGrainDesc) filmGrain;       // all zero if no grain is applied
+    uint16_t upscaledWidthMinus1;
+    uint16_t frameHeightMinus1;
+    uint16_t renderWidthMinus1;
+    uint16_t renderHeightMinus1;
+    uint8_t orderHint;
+    uint8_t applyGrain; // "apply_grain" ("load_grain_params" restores it)
+    uint8_t valid;      // 0 if the frame inherited state that was not provided
+};
+
 NriStruct(VideoAV1EncodePictureDesc) {
     uint32_t currentFrameId;
     uint8_t orderHint;
@@ -792,8 +821,8 @@ NriStruct(VideoAV1EncodePictureDesc) {
     uint16_t renderWidthMinus1;
     uint16_t renderHeightMinus1;
     uint8_t codedDenom;
-    uint8_t interpolationFilter;
-    uint8_t txMode;
+    uint8_t interpolationFilter; // AV1 "interpolation_filter": 0..4 (4 = SWITCHABLE)
+    uint8_t txMode;              // 0 selects the default, else AV1 "TxMode" 1..2 (LARGEST, SELECT); ONLY_4X4 is implied for lossless frames
     uint8_t baseQIndex;
     uint8_t cdefDampingMinus3;
     uint8_t cdefBits;
@@ -832,8 +861,8 @@ NriStruct(VideoAV1DecodePictureDesc) {
     uint8_t baseQIndex;
     uint8_t superresDenom;
     uint8_t codedDenom;
-    uint8_t interpolationFilter;
-    uint8_t txMode;
+    uint8_t interpolationFilter; // AV1 "interpolation_filter": 0..4 (4 = SWITCHABLE)
+    uint8_t txMode;              // AV1 "TxMode": 0..2 (ONLY_4X4, LARGEST, SELECT)
     uint8_t cdefDampingMinus3;
     uint8_t cdefBits;
     uint8_t deltaQRes;
@@ -845,8 +874,9 @@ NriStruct(VideoAV1DecodePictureDesc) {
     NriOptional const NriPtr(VideoAV1SegmentationDesc) segmentation;
     NriOptional const NriPtr(VideoAV1LoopRestorationDesc) loopRestoration;
     NriOptional const NriPtr(VideoAV1GlobalMotionDesc) globalMotion;
-    NriOptional const NriPtr(VideoAV1FilmGrainDesc) filmGrain; // used with "APPLY_GRAIN"; TODO: currently unsupported for decode
-    NriOptional const uint8_t* orderHints; // if provided, must include 8 entries
+    NriOptional const NriPtr(VideoAV1FilmGrainDesc) filmGrain; // used with "APPLY_GRAIN": resolved parameters ("load_grain_params" applied, e.g. "VideoAV1EncodeDecodeInfo::filmGrain")
+    NriOptional const uint8_t* orderHints;                     // 8 entries indexed like AV1 "OrderHints[]" by reference frame name: 0 = INTRA_FRAME, 1..7 = LAST..ALTREF; named reference entries are overridden by "references[].orderHint"
+    Nri(VideoAV1ReferenceName) skipModeFrames[2]; // "SkipModeFrame[0..1]" used with "SKIP_MODE_PRESENT"
     const NriPtr(VideoAV1DecodeTileDesc) tiles;
     uint32_t tileNum;
     NriOptional const NriPtr(VideoAV1ReferenceDesc) references;
@@ -856,12 +886,13 @@ NriStruct(VideoAV1DecodePictureDesc) {
 NriStruct(VideoDecodeDesc) {
     NriPtr(VideoSession) session;
     NriPtr(VideoSessionParameters) parameters;
-    Nri(VideoDecodeBitstreamRange) bitstream; // provide at least one source supported by "VideoCapabilities::decodeBitstreamSourceMask"
+    Nri(VideoDecodeBitstreamRange) bitstream;               // provide at least one source supported by "VideoCapabilities::decodeBitstreamSourceMask"
     NriPtr(VideoPicture) dstPicture;
-    NriOptional NriPtr(VideoPicture) setupPicture; // reconstructed/DPB setup picture; required for distinct mode, may alias "dstPicture" in coincide mode
+    NriOptional NriPtr(VideoPicture) setupPicture;          // reconstructed/DPB setup picture; required for distinct mode, may alias "dstPicture" in coincide mode. "APPLY_GRAIN" requires a distinct setup picture in sessions with DPB slots
     NriOptional const NriPtr(VideoReference) references;
     NriOptional uint32_t referenceNum;
-    uint32_t dstSlot; // default reconstructed picture slot; neutral H.264 may override it with "referenceSlot"; native DXVA "CurrPic" must use "dstSlot" and reference "PicEntry" indices must match "VideoReference::slot"
+    uint32_t dstSlot;                                        // default setup slot, always written; neutral H.264 may override it with "referenceSlot"; native DXVA "CurrPic" must use "dstSlot" and reference "PicEntry" indices must match "VideoReference::slot"
+                                                             // for non-reference pictures, use a slot whose picture is no longer needed, never one referenced by this or a later decode
     NriOptional const NriPtr(VideoDecodeArgument) arguments; // native DXVA frame arguments; if omitted, the neutral codec picture description is used
     NriOptional uint32_t argumentNum;
     NriOptional const NriPtr(VideoH264DecodePictureDesc) h264PictureDesc; // neutral H.264 picture description; required if "argumentNum" is 0
@@ -885,10 +916,13 @@ NriStruct(VideoEncodeFeedback) {
 NriStruct(VideoAV1EncodeDecodeInfoDesc) {
     const NriPtr(VideoEncodeFeedback) feedback;
     const NriPtr(VideoAV1SequenceDesc) sequence;
-    NriOptional const uint8_t* encodedPayloadHeader; // first bytes of the encoded payload; returned bitstream ranges are bounded by "feedback"
+    NriOptional const uint8_t* encodedPayloadHeader;                    // encoded payload prefix sufficient to parse the frame header and locate every tile; may be the complete payload. Payload-header input may be unsupported; returned bitstream ranges are bounded by "feedback"
     uint64_t encodedPayloadHeaderSize;
-    NriOptional const NriPtr(VideoAV1ReferenceDesc) references; // previous AV1 DPB snapshot; required for inter frames
+    NriOptional const NriPtr(VideoAV1ReferenceDesc) references;         // previous AV1 DPB snapshot; required for inter frames, without it the frame is a key frame (as encoded with "FORCE_KEY_FRAME")
     NriOptional uint32_t referenceNum;
+    NriOptional const NriPtr(VideoEncodePictureDesc) pictureDesc;       // submitted picture description; required if "encodedPayloadHeader" is not provided
+    NriOptional const NriPtr(VideoAV1EncodePictureDesc) av1PictureDesc; // submitted AV1 picture description; required if "encodedPayloadHeader" is not provided
+    NriOptional const NriPtr(VideoAV1SavedFrameState) savedFrameStates; // 8 entries indexed by "refFrameIndex": the "savedFrameState" of the frame that last refreshed each slot; required for headers that inherit state
 };
 
 NriStruct(VideoAV1EncodeDecodeInfo) {
@@ -902,13 +936,15 @@ NriStruct(VideoAV1EncodeDecodeInfo) {
     uint16_t miRowStarts[65];
     uint16_t widthInSuperblocksMinus1[64];
     uint16_t heightInSuperblocksMinus1[64];
-    Nri(VideoAV1ReferenceDesc) references[8];
+    Nri(VideoAV1ReferenceDesc) references[15];      // 7 named entries, then a NONE entry for every other valid reference frame map entry
     Nri(VideoAV1QuantizationDesc) quantization;
     Nri(VideoAV1LoopFilterDesc) loopFilter;
     Nri(VideoAV1CdefDesc) cdef;
     Nri(VideoAV1SegmentationDesc) segmentation;
     Nri(VideoAV1LoopRestorationDesc) loopRestoration;
     Nri(VideoAV1GlobalMotionDesc) globalMotion;
+    Nri(VideoAV1FilmGrainDesc) filmGrain;           // resolved parameters ("load_grain_params" applied)
+    Nri(VideoAV1SavedFrameState) savedFrameState;   // store into "savedFrameStates[i]" for every slot "i" in "picture.refreshFrameFlags"
 };
 
 NriStruct(VideoEncodeDesc) {
@@ -916,24 +952,25 @@ NriStruct(VideoEncodeDesc) {
     NriPtr(VideoSessionParameters) parameters;
     NriPtr(VideoPicture) srcPicture;
     Nri(VideoBitstreamRange) dstBitstream;
-    uint64_t bitstreamMetadataSize; // bytes of codec metadata already written before the current frame payload
+    uint64_t bitstreamMetadataSize;                         // bytes of codec metadata already written before the current frame payload
     NriOptional const NriPtr(VideoEncodePictureDesc) pictureDesc;
     NriOptional const NriPtr(VideoEncodeRateControlDesc) rateControlDesc;
     Nri(VideoEncodeBits) flags;
-    NriOptional NriPtr(VideoPicture) reconstructedPicture;
-    NriOptional NriPtr(Buffer) metadata; // backend encode metadata; required if "VideoCapabilities::metadataSize" is non-zero
+    NriOptional NriPtr(VideoPicture) reconstructedPicture;  // reconstructed/DPB setup picture; required for sessions with DPB slots, also for non-reference pictures (B frames, AV1 "refreshFrameFlags = 0"): the slot is written, but not referenced afterwards
+    NriOptional NriPtr(Buffer) metadata;                    // opaque encode metadata; required if "VideoCapabilities::metadataSize" is non-zero
     uint64_t metadataOffset;
-    NriOptional NriPtr(Buffer) resolvedMetadata; // backend metadata consumed by "GetVideoEncodeFeedback" after the required resolve operation; a pending range must not be reused
+    NriOptional NriPtr(Buffer) resolvedMetadata;            // opaque feedback metadata consumed by "GetVideoEncodeFeedback" after the required resolve operation; a pending range must not be reused
     uint64_t resolvedMetadataOffset;
     NriOptional const NriPtr(VideoReference) references;
     NriOptional uint32_t referenceNum;
     uint32_t reconstructedSlot;
     NriOptional const NriPtr(VideoH264EncodePictureDesc) h264PictureDesc;
+    NriOptional const NriPtr(VideoH265EncodePictureDesc) h265PictureDesc; // parameter set selection; all ids default to 0
     NriOptional const NriPtr(VideoAV1EncodePictureDesc) av1PictureDesc;
     NriOptional const NriPtr(VideoH265ReferenceDesc) h265ReferenceDescs;
 };
 
-// "ResetVideoSession" discards session state reserved while recording commands. Reset affected command buffers first
+// When discarding recorded video commands, reset affected command buffers and call "ResetVideoSession" before recording further commands for the session
 // Threadsafe: no
 NriStruct(VideoInterface) {
     // Session
@@ -948,7 +985,7 @@ NriStruct(VideoInterface) {
         void            (NRI_CALL *DestroyVideoSessionParameters)   (NriPtr(VideoSessionParameters) videoSessionParameters);
         void            (NRI_CALL *DestroyVideoPicture)             (NriPtr(VideoPicture) videoPicture);
 
-        // Returns backend-specific states for explicit caller-recorded decode/encode picture barriers
+        // Returns the states required for caller-recorded decode/encode picture barriers
         Nri(Result)     (NRI_CALL *GetVideoPictureState)            (const NriRef(VideoPicture) videoPicture, Nri(VideoPictureRole) role, NriOut NriRef(VideoPictureState) state);
 
         // Serializes H.264 SPS/PPS or H.265 VPS/SPS/PPS parameter sets to Annex-B bytes. Pass "dst = nullptr" to query the required byte size in "writtenSize"
@@ -964,7 +1001,7 @@ NriStruct(VideoInterface) {
     // Command buffer
     // {
         // Video decode/encode command buffers must be created from "QueueType::VIDEO_DECODE" or "QueueType::VIDEO_ENCODE" queues.
-        // VK: video session initialization is implicit on first recorded use, so commands for the same session must be recorded in submit order
+        // Commands for the same video session must be recorded in submission order
         void            (NRI_CALL *CmdDecodeVideo)                  (NriRef(CommandBuffer) commandBuffer, const NriRef(VideoDecodeDesc) videoDecodeDesc);
         void            (NRI_CALL *CmdEncodeVideo)                  (NriRef(CommandBuffer) commandBuffer, const NriRef(VideoEncodeDesc) videoEncodeDesc);
 

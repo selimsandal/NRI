@@ -228,16 +228,9 @@ private:
 Result CreateDeviceNONE(const DeviceCreationDesc& desc, DeviceBase*& device) {
     DeviceNONE* impl = Allocate<DeviceNONE>(desc.allocationCallbacks, desc.callbackInterface, desc.allocationCallbacks, desc.adapterDesc);
 
-    if (!impl) {
-        Destroy(desc.allocationCallbacks, impl);
-        device = nullptr;
-
-        return Result::FAILURE;
-    }
-
     device = (DeviceBase*)impl;
 
-    return Result::SUCCESS;
+    return impl ? Result::SUCCESS : Result::OUT_OF_MEMORY;
 }
 
 //============================================================================================================================================================================================
@@ -281,7 +274,7 @@ static Result NRI_CALL CreateCommandBuffer(CommandAllocator&, CommandBuffer*& co
     return Result::SUCCESS;
 }
 
-static Result NRI_CALL CreateFence(Device&, uint64_t, Fence*& fence) {
+static Result NRI_CALL CreateFence(Device&, const FenceDesc&, Fence*& fence) {
     fence = DummyObject<Fence>();
 
     return Result::SUCCESS;
@@ -686,6 +679,24 @@ static uint64_t NRI_CALL GetDescriptorNativeObject(const Descriptor*) {
     return 0;
 }
 
+static Result NRI_CALL GetBufferSharedHandle(const Buffer&, SharedHandle& sharedHandle) {
+    sharedHandle = {};
+
+    return Result::SUCCESS;
+}
+
+static Result NRI_CALL GetTextureSharedHandle(const Texture&, SharedHandle& sharedHandle) {
+    sharedHandle = {};
+
+    return Result::SUCCESS;
+}
+
+static Result NRI_CALL GetFenceSharedHandle(const Fence&, SharedHandle& sharedHandle) {
+    sharedHandle = {};
+
+    return Result::SUCCESS;
+}
+
 Result DeviceNONE::FillFunctionTable(CoreInterface& table) const {
     table.GetDeviceDesc = ::GetDeviceDesc;
     table.GetBufferDesc = ::GetBufferDesc;
@@ -801,6 +812,10 @@ Result DeviceNONE::FillFunctionTable(CoreInterface& table) const {
     table.GetBufferNativeObject = ::GetBufferNativeObject;
     table.GetTextureNativeObject = ::GetTextureNativeObject;
     table.GetDescriptorNativeObject = ::GetDescriptorNativeObject;
+    table.GetBufferSharedHandle = ::GetBufferSharedHandle;
+    table.GetTextureSharedHandle = ::GetTextureSharedHandle;
+    table.GetFenceSharedHandle = ::GetFenceSharedHandle;
+    table.DestroySharedHandle = DestroySharedHandle;
 
     return Result::SUCCESS;
 }
@@ -1168,6 +1183,7 @@ static Result NRI_CALL GetVideoCapabilities(const Device&, const VideoSessionDes
     videoCapabilities.decodeNativeArgumentsSupported = true;
     videoCapabilities.encodeBitstreamRangeSizeSupported = true;
     videoCapabilities.encodeFeedbackSupported = true;
+    videoCapabilities.encodeReferenceCountOverrideSupported = true;
 
     return Result::SUCCESS;
 }

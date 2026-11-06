@@ -1,5 +1,26 @@
 // © 2021 NVIDIA Corporation
 
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+// VK exports one NT handle per object and handle type: a repeated export returns the same handle, which the first "CloseHandle" closes
+// for everyone (VUID-VkMemoryGetWin32HandleInfoKHR-handleType-00663, VUID-VkSemaphoreGetWin32HandleInfoKHR-handleType-01127).
+// So the export is done once, retained until the object is destroyed, and each caller gets a duplicate it owns
+static inline Result DuplicateSharedHandle(DeviceVK& device, void* exportedHandle, SharedHandle& sharedHandle) {
+    HANDLE process = GetCurrentProcess();
+    HANDLE handle = nullptr;
+
+    if (!DuplicateHandle(process, (HANDLE)exportedHandle, process, &handle, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+        NRI_REPORT_ERROR(&device, "DuplicateHandle() failed, error = %u", (uint32_t)GetLastError());
+
+        return Result::FAILURE;
+    }
+
+    sharedHandle.handle = handle;
+    sharedHandle.type = SharedHandleType::OPAQUE_WIN32;
+
+    return Result::SUCCESS;
+}
+#endif
+
 constexpr bool VERBOSE = false;
 
 static inline const char* GetDeviceLostAddressTypeName(VkDeviceFaultAddressTypeEXT type) {
@@ -52,6 +73,7 @@ static inline uint8_t GetMemoryTypeScore(MemoryLocation memoryLocation, VkMemory
         case MemoryLocation::HOST_UPLOAD:
             return !isDeviceLocal * 4 + isHostCoherent * 2 + !isHostCached;
         case MemoryLocation::HOST_READBACK:
+            // TODO: Cached noncoherent memory can perform better; benchmark the coherence preference
             return !isDeviceLocal * 4 + isHostCached * 2 + isHostCoherent;
         default:
             return 0;
@@ -92,10 +114,7 @@ static inline VkBufferImageCopy GetLegacyBufferImageCopyRegion(const VkBufferIma
 static constexpr VkBufferUsageFlags GetBufferUsageFlags(const BufferDesc& bufferDesc, bool isDeviceAddressSupported) {
     VkBufferUsageFlags flags = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT; // TODO: ban "the opposite" for UPLOAD/READBACK?
 
-    constexpr uint32_t videoUsageMask = (uint32_t)BufferUsageBits::VIDEO_DECODE | (uint32_t)BufferUsageBits::VIDEO_ENCODE;
-    const uint32_t usageMask = (uint32_t)bufferDesc.usage;
-    const bool isVideoOnly = (usageMask & videoUsageMask) != 0 && (usageMask & ~videoUsageMask) == 0;
-    if (isDeviceAddressSupported && !isVideoOnly)
+    if (isDeviceAddressSupported && !IsVideoOnly(bufferDesc))
         flags |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 
     if (bufferDesc.usage & BufferUsageBits::VERTEX)
@@ -168,6 +187,8 @@ static constexpr VkImageUsageFlags GetImageUsageFlags(TextureUsageBits textureUs
     if (textureUsageBits & TextureUsageBits::VIDEO_DECODE) {
         if (textureUsageBits & TextureUsageBits::VIDEO_REFERENCE_ONLY)
             flags |= VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR;
+        else if (textureUsageBits & TextureUsageBits::VIDEO_OUTPUT_ONLY)
+            flags |= VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR;
         else
             flags |= VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR;
     }
@@ -175,6 +196,8 @@ static constexpr VkImageUsageFlags GetImageUsageFlags(TextureUsageBits textureUs
     if (textureUsageBits & TextureUsageBits::VIDEO_ENCODE) {
         if (textureUsageBits & TextureUsageBits::VIDEO_REFERENCE_ONLY)
             flags |= VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR;
+        else if (textureUsageBits & TextureUsageBits::VIDEO_OUTPUT_ONLY)
+            flags |= VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR;
         else
             flags |= VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR | VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR;
     }
@@ -563,6 +586,7 @@ void DeviceVK::ProcessDeviceExtensions(Vector<const char*>& desiredDeviceExts, b
     APPEND_EXT(m_MinorVersion < 3, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
     APPEND_EXT(m_MinorVersion < 3, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
     APPEND_EXT(m_MinorVersion < 3, VK_KHR_MAINTENANCE_4_EXTENSION_NAME);
+    APPEND_EXT(m_MinorVersion < 3, VK_KHR_FORMAT_FEATURE_FLAGS_2_EXTENSION_NAME);
     APPEND_EXT(m_MinorVersion < 3, VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME);
     APPEND_EXT(m_MinorVersion < 3, VK_EXT_IMAGE_ROBUSTNESS_EXTENSION_NAME);
     APPEND_EXT(m_MinorVersion < 3, VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME); // TODO: there are 2 and 3 versions...
@@ -588,6 +612,15 @@ void DeviceVK::ProcessDeviceExtensions(Vector<const char*>& desiredDeviceExts, b
     APPEND_EXT(!disableRayTracing, VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME);
 
     APPEND_EXT(deviceLostInfoLevel != DeviceLostInfoLevel::NONE, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+
+    // Shared handles (skipped if the app already asked for them via "vkExtensions")
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+    APPEND_EXT(!IsExtensionSupported(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME, desiredDeviceExts), VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
+    APPEND_EXT(!IsExtensionSupported(VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME, desiredDeviceExts), VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME);
+#else
+    APPEND_EXT(!IsExtensionSupported(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME, desiredDeviceExts), VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+    APPEND_EXT(!IsExtensionSupported(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME, desiredDeviceExts), VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+#endif
 
     APPEND_EXT(true, VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
     APPEND_EXT(true, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
@@ -736,7 +769,7 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
         if (!isWrapper) {
             ProcessInstanceExtensions(desiredInstanceExts);
 
-            res = CreateInstance(desc.enableGraphicsAPIValidation, desiredInstanceExts);
+            res = CreateInstance(desc.enableGraphicsAPIValidation, desiredInstanceExts, desc.vkInstanceCreateInfoNext);
             if (res != Result::SUCCESS)
                 return res;
         }
@@ -774,7 +807,7 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
                 m_VK.GetPhysicalDeviceProperties2(deviceGroups[i].physicalDevices[0], &props);
 
                 uint32_t majorVersion = VK_API_VERSION_MAJOR(props.properties.apiVersion);
-                m_MinorVersion = VK_API_VERSION_MINOR(props.properties.apiVersion);
+                m_MinorVersion = std::min(VK_API_VERSION_MINOR(props.properties.apiVersion), VK_API_VERSION_MINOR(m_InstanceVersion));
 
                 bool isSupported = (majorVersion * 10 + m_MinorVersion) >= 12;
                 if (desc.adapterDesc) {
@@ -1519,6 +1552,12 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
         m_Desc.other.timestampFrequencyHz = uint64_t(1e9 / double(limits.timestampPeriod) + 0.5);
         m_Desc.other.drawIndirectMaxNum = limits.maxDrawIndirectCount;
         m_Desc.other.samplerLodBiasMax = limits.maxSamplerLodBias;
+
+#ifdef __APPLE__
+        if (IsExtensionSupported(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME, desiredDeviceExts) && !PortabilitySubsetFeatures.samplerMipLodBias)
+            m_Desc.other.samplerLodBiasMax = 0.0f;
+#endif
+
         m_Desc.other.samplerAnisotropyMax = limits.maxSamplerAnisotropy;
         m_Desc.other.texelOffsetMin = (int8_t)limits.minTexelOffset;
         m_Desc.other.texelOffsetMax = (uint8_t)limits.maxTexelOffset;
@@ -1564,6 +1603,7 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
         m_Desc.features.presentFromCompute = true;
         m_Desc.features.waitableSwapChain = m_Desc.features.swapChain != 0 && PresentIdFeatures.presentId != 0 && PresentWaitFeatures.presentWait != 0;
         m_Desc.features.resizableSwapChain = m_Desc.features.swapChain != 0 && m_IsSupported.swapChainMaintenance1 != 0;
+        m_Desc.features.latestReadySwapChain = m_Desc.features.swapChain != 0 && m_IsSupported.fifoLatestReady != 0;
         m_Desc.features.layerBasedMultiview = features11.multiview;
         m_Desc.features.textureCompressionBC = features.features.textureCompressionBC;
         m_Desc.features.textureCompressionETC2 = features.features.textureCompressionETC2;
@@ -1620,6 +1660,33 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
         m_Desc.features.tessellationShader = features.features.tessellationShader != 0;
         m_Desc.features.geometryShader = features.features.geometryShader != 0;
         m_Desc.features.meshShader = MeshShaderFeatures.meshShader != 0 && MeshShaderFeatures.taskShader != 0;
+
+        // Remove unavailable shader stages from umbrella masks and explicit visibility masks.
+        if (!features.features.tessellationShader) {
+            m_SupportedShaderStages &= ~StageBits::TESSELLATION_SHADERS;
+            m_UnsupportedPipelineStages |= VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT | VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT;
+        }
+
+        if (!features.features.geometryShader) {
+            m_SupportedShaderStages &= ~StageBits::GEOMETRY_SHADER;
+            m_UnsupportedPipelineStages |= VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT;
+        }
+
+        if (!MeshShaderFeatures.taskShader) {
+            m_SupportedShaderStages &= ~StageBits::TASK_SHADER;
+            m_UnsupportedPipelineStages |= VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT;
+        }
+
+        if (!MeshShaderFeatures.meshShader) {
+            m_SupportedShaderStages &= ~StageBits::MESH_SHADER;
+            m_UnsupportedPipelineStages |= VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT;
+        }
+
+        if (!RayTracingPipelineFeatures.rayTracingPipeline) {
+            m_SupportedShaderStages &= ~StageBits::RAY_TRACING_SHADERS;
+            m_UnsupportedPipelineStages |= VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
+        }
+
         m_Desc.features.lowLatency = m_IsSupported.presentId != 0 && IsExtensionSupported(VK_NV_LOW_LATENCY_2_EXTENSION_NAME, desiredDeviceExts);
         m_Desc.features.componentSwizzle = true;
         m_Desc.features.independentFrontAndBackStencilReferenceAndMasks = true;
@@ -1627,6 +1694,14 @@ Result DeviceVK::Create(const DeviceCreationDesc& desc, const DeviceCreationVKDe
         m_Desc.features.constantAlphaBlendFactors = true;
         m_Desc.features.logicOp = features.features.logicOp;
         m_Desc.features.depthBoundsTest = features.features.depthBounds;
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+        m_Desc.features.sharedResources = IsExtensionSupported(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME, desiredDeviceExts);
+        m_Desc.features.sharedFences = IsExtensionSupported(VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME, desiredDeviceExts);
+#else
+        m_Desc.features.sharedResources = IsExtensionSupported(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME, desiredDeviceExts);
+        m_Desc.features.sharedFences = IsExtensionSupported(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME, desiredDeviceExts);
+#endif
+        m_Desc.features.sharedFences = m_Desc.features.sharedFences && (IsSharedFenceSupported(VK_SEMAPHORE_TYPE_TIMELINE) || IsSharedFenceSupported(VK_SEMAPHORE_TYPE_BINARY));
         m_Desc.features.drawIndirectCount = features12.drawIndirectCount;
         m_Desc.features.lineSmoothing = features14.smoothLines;
         m_Desc.features.meshShaderPipelineStats = MeshShaderFeatures.meshShaderQueries == VK_TRUE;
@@ -1771,6 +1846,21 @@ void DeviceVK::FillCreateInfo(const TextureDesc& textureDesc, VkImageCreateInfo&
     info.initialLayout = IsMemoryZeroInitializationEnabled() ? VK_IMAGE_LAYOUT_ZERO_INITIALIZED_EXT : VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
+void DeviceVK::AppendVideoProfileList(const TextureDesc& textureDesc, VkImageCreateInfo& info, VideoResourceProfileListVK& videoProfiles) const {
+    const bool isVideoDecode = (textureDesc.usage & TextureUsageBits::VIDEO_DECODE) != 0;
+    const bool isVideoEncode = (textureDesc.usage & TextureUsageBits::VIDEO_ENCODE) != 0;
+
+    if (!isVideoDecode && !isVideoEncode)
+        return;
+
+    videoProfiles.Fill(isVideoDecode, isVideoEncode, textureDesc.format, textureDesc.videoCodec, textureDesc.videoAV1FilmGrain, GetVideoCodecOperations(isVideoDecode, isVideoEncode));
+
+    if (videoProfiles.list.profileCount) {
+        videoProfiles.list.pNext = info.pNext;
+        info.pNext = &videoProfiles.list;
+    }
+}
+
 void DeviceVK::FillCreateInfo(const SamplerDesc& samplerDesc, VkSamplerCreateInfo& info, VkSamplerReductionModeCreateInfo& reductionModeInfo, VkSamplerCustomBorderColorCreateInfoEXT& borderColorInfo) const {
     info = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO}; // should be already set
     info.magFilter = GetFilter(samplerDesc.filters.mag);
@@ -1846,6 +1936,9 @@ void DeviceVK::GetMemoryDesc2(const TextureDesc& textureDesc, MemoryLocation mem
     VkMemoryRequirements2 requirements = {VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2};
     requirements.pNext = &dedicatedRequirements;
 
+    VideoResourceProfileListVK videoProfiles = {};
+    AppendVideoProfileList(textureDesc, createInfo, videoProfiles);
+
     VkDeviceImageMemoryRequirements imageMemoryRequirements = {VK_STRUCTURE_TYPE_DEVICE_IMAGE_MEMORY_REQUIREMENTS};
     imageMemoryRequirements.pCreateInfo = &createInfo;
 
@@ -1892,6 +1985,7 @@ bool DeviceVK::GetMemoryDesc(MemoryLocation memoryLocation, const VkMemoryRequir
         if ((flags & requiredFlags) != requiredFlags)
             continue;
 
+        // TODO: Exclude DEVICE_COHERENT_BIT_AMD types when deviceCoherentMemory is disabled; scoring can override Vulkan's ordering that places AMD device-coherent/uncached types last
         const uint8_t score = GetMemoryTypeScore(memoryLocation, flags);
         if (memoryTypeIndex == UINT32_MAX || score > bestScore) {
             memoryTypeIndex = i;
@@ -2015,7 +2109,7 @@ void DeviceVK::GetMicromapBuildSizesInfo(const MicromapDesc& micromapDesc, VkMic
     vk.GetMicromapBuildSizesEXT(m_Device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &buildInfo, &sizesInfo);
 }
 
-Result DeviceVK::CreateInstance(bool enableGraphicsAPIValidation, const Vector<const char*>& desiredInstanceExts) {
+Result DeviceVK::CreateInstance(bool enableGraphicsAPIValidation, const Vector<const char*>& desiredInstanceExts, const void* instanceCreateInfoNext) {
     Vector<const char*> layers(GetStdAllocator());
     if (enableGraphicsAPIValidation)
         layers.push_back("VK_LAYER_KHRONOS_validation");
@@ -2031,6 +2125,7 @@ Result DeviceVK::CreateInstance(bool enableGraphicsAPIValidation, const Vector<c
 
     VkApplicationInfo appInfo = {VK_STRUCTURE_TYPE_APPLICATION_INFO};
     appInfo.apiVersion = std::clamp(instanceVersion, VK_API_VERSION_1_2, VK_API_VERSION_1_4);
+    m_InstanceVersion = appInfo.apiVersion;
 
     const VkValidationFeatureEnableEXT enabledValidationFeatures[] = {
         VK_VALIDATION_FEATURE_ENABLE_DEBUG_PRINTF_EXT, // TODO: add VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT?
@@ -2066,6 +2161,9 @@ Result DeviceVK::CreateInstance(bool enableGraphicsAPIValidation, const Vector<c
 
     if (enableGraphicsAPIValidation)
         PNEXTCHAIN_APPEND_STRUCT(validationFeatures);
+
+    // Caller's structures go last
+    *_tail = instanceCreateInfoNext;
 
     vkResult = m_VK.CreateInstance(&instanceCreateInfo, m_AllocationCallbackPtr, &m_Instance);
     NRI_RETURN_ON_BAD_VKRESULT(this, vkResult, "vkCreateInstance");
@@ -2206,6 +2304,8 @@ Result DeviceVK::ResolveInstanceDispatchTable(const Vector<const char*>& desired
     GET_INSTANCE_FUNC(GetDeviceGroupPeerMemoryFeatures);
     GET_INSTANCE_FUNC(GetPhysicalDeviceFormatProperties2);
     GET_INSTANCE_FUNC(GetPhysicalDeviceImageFormatProperties2);
+    GET_INSTANCE_FUNC(GetPhysicalDeviceExternalBufferProperties);
+    GET_INSTANCE_FUNC(GetPhysicalDeviceExternalSemaphoreProperties);
     GET_INSTANCE_FUNC(CreateDevice);
     GET_INSTANCE_FUNC(GetDeviceQueue2);
     GET_INSTANCE_FUNC(EnumeratePhysicalDeviceGroups);
@@ -2406,6 +2506,18 @@ Result DeviceVK::ResolveDispatchTable(const Vector<const char*>& desiredDeviceEx
 #ifdef VK_USE_PLATFORM_WIN32_KHR
     if (IsExtensionSupported(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME, desiredDeviceExts))
         GET_DEVICE_FUNC(GetMemoryWin32HandlePropertiesKHR);
+#endif
+
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+    if (IsExtensionSupported(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME, desiredDeviceExts))
+        GET_DEVICE_FUNC(GetMemoryWin32HandleKHR);
+    if (IsExtensionSupported(VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME, desiredDeviceExts))
+        GET_DEVICE_FUNC(GetSemaphoreWin32HandleKHR);
+#else
+    if (IsExtensionSupported(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME, desiredDeviceExts))
+        GET_DEVICE_FUNC(GetMemoryFdKHR);
+    if (IsExtensionSupported(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME, desiredDeviceExts))
+        GET_DEVICE_FUNC(GetSemaphoreFdKHR);
 #endif
 
     if (IsExtensionSupported(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, desiredDeviceExts)) {
@@ -2874,6 +2986,257 @@ NRI_INLINE void DeviceVK::DestroyFramebuffers(VkImageView imageView) {
             entry.desc.attachments.clear();
         }
     }
+}
+
+bool DeviceVK::IsSharedFenceSupported(VkSemaphoreType type) const {
+    VkSemaphoreTypeCreateInfo semaphoreType = {VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+    semaphoreType.semaphoreType = type;
+
+    VkPhysicalDeviceExternalSemaphoreInfo info = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO};
+    info.pNext = &semaphoreType;
+    info.handleType = SHARED_SEMAPHORE_HANDLE_TYPE;
+
+    VkExternalSemaphoreProperties props = {VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES};
+    m_VK.GetPhysicalDeviceExternalSemaphoreProperties(m_PhysicalDevice, &info, &props);
+
+    return (props.externalSemaphoreFeatures & VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT) != 0;
+}
+
+// Shared resources are dedicated allocations outside VMA, so the export info can be chained
+Result DeviceVK::AllocateSharedMemory(const MemoryDesc& memoryDesc, float priority, VkBuffer buffer, VkImage image, VkDeviceMemory& memory) {
+    MemoryTypeInfo memoryTypeInfo = Unpack(memoryDesc.type);
+
+    VkExportMemoryAllocateInfo exportInfo = {VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO};
+    exportInfo.handleTypes = SHARED_MEMORY_HANDLE_TYPE;
+
+    VkMemoryPriorityAllocateInfoEXT priorityInfo = {VK_STRUCTURE_TYPE_MEMORY_PRIORITY_ALLOCATE_INFO_EXT};
+    priorityInfo.pNext = &exportInfo;
+    priorityInfo.priority = priority * 0.5f + 0.5f;
+
+    VkMemoryDedicatedAllocateInfo dedicatedInfo = {VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
+    dedicatedInfo.pNext = m_IsSupported.memoryPriority ? (const void*)&priorityInfo : (const void*)&exportInfo;
+    dedicatedInfo.buffer = buffer;
+    dedicatedInfo.image = image;
+
+    VkMemoryAllocateFlagsInfo flagsInfo = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
+    flagsInfo.pNext = &dedicatedInfo;
+    flagsInfo.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+
+    VkMemoryAllocateInfo allocateInfo = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocateInfo.pNext = (buffer && m_IsSupported.deviceAddress) ? (const void*)&flagsInfo : (const void*)&dedicatedInfo; // buffers get "VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT" (see "FillCreateInfo")
+    allocateInfo.allocationSize = memoryDesc.size;
+    allocateInfo.memoryTypeIndex = memoryTypeInfo.index;
+
+    VkDeviceMemory handle = VK_NULL_HANDLE;
+    VkResult vkResult = m_VK.AllocateMemory(m_Device, &allocateInfo, m_AllocationCallbackPtr, &handle);
+    NRI_RETURN_ON_BAD_VKRESULT(this, vkResult, "vkAllocateMemory");
+
+    memory = handle;
+
+    return Result::SUCCESS;
+}
+
+Result DeviceVK::GetSharedMemoryHandle(VkDeviceMemory memory, uint64_t size, void*& exportedHandle, SharedHandle& sharedHandle) {
+    sharedHandle = {};
+    sharedHandle.size = size;
+
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+    ExclusiveScope lock(m_SharedHandleLock);
+
+    if (!exportedHandle) {
+        VkMemoryGetWin32HandleInfoKHR getInfo = {VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR};
+        getInfo.memory = memory;
+        getInfo.handleType = SHARED_MEMORY_HANDLE_TYPE;
+
+        HANDLE handle = nullptr;
+        VkResult vkResult = m_VK.GetMemoryWin32HandleKHR(m_Device, &getInfo, &handle);
+        NRI_RETURN_ON_BAD_VKRESULT(this, vkResult, "vkGetMemoryWin32HandleKHR");
+
+        exportedHandle = handle;
+    }
+
+    return DuplicateSharedHandle(*this, exportedHandle, sharedHandle);
+#else
+    MaybeUnused(exportedHandle); // each FD export is independent
+
+    VkMemoryGetFdInfoKHR getInfo = {VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR};
+    getInfo.memory = memory;
+    getInfo.handleType = SHARED_MEMORY_HANDLE_TYPE;
+
+    int fd = -1;
+    VkResult vkResult = m_VK.GetMemoryFdKHR(m_Device, &getInfo, &fd);
+    NRI_RETURN_ON_BAD_VKRESULT(this, vkResult, "vkGetMemoryFdKHR");
+
+    sharedHandle.handle = (void*)(intptr_t)fd;
+    sharedHandle.type = SharedHandleType::OPAQUE_FD;
+
+    return Result::SUCCESS;
+#endif
+}
+
+Result DeviceVK::GetSharedSemaphoreHandle(VkSemaphore semaphore, void*& exportedHandle, SharedHandle& sharedHandle) {
+    sharedHandle = {};
+
+#ifdef VK_USE_PLATFORM_WIN32_KHR
+    ExclusiveScope lock(m_SharedHandleLock);
+
+    if (!exportedHandle) {
+        VkSemaphoreGetWin32HandleInfoKHR getInfo = {VK_STRUCTURE_TYPE_SEMAPHORE_GET_WIN32_HANDLE_INFO_KHR};
+        getInfo.semaphore = semaphore;
+        getInfo.handleType = SHARED_SEMAPHORE_HANDLE_TYPE;
+
+        HANDLE handle = nullptr;
+        VkResult vkResult = m_VK.GetSemaphoreWin32HandleKHR(m_Device, &getInfo, &handle);
+        NRI_RETURN_ON_BAD_VKRESULT(this, vkResult, "vkGetSemaphoreWin32HandleKHR");
+
+        exportedHandle = handle;
+    }
+
+    return DuplicateSharedHandle(*this, exportedHandle, sharedHandle);
+#else
+    MaybeUnused(exportedHandle); // each FD export is independent
+
+    VkSemaphoreGetFdInfoKHR getInfo = {VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR};
+    getInfo.semaphore = semaphore;
+    getInfo.handleType = SHARED_SEMAPHORE_HANDLE_TYPE;
+
+    int fd = -1;
+    VkResult vkResult = m_VK.GetSemaphoreFdKHR(m_Device, &getInfo, &fd);
+    NRI_RETURN_ON_BAD_VKRESULT(this, vkResult, "vkGetSemaphoreFdKHR");
+
+    sharedHandle.handle = (void*)(intptr_t)fd;
+    sharedHandle.type = SharedHandleType::OPAQUE_FD;
+
+    return Result::SUCCESS;
+#endif
+}
+
+NRI_INLINE Result DeviceVK::CreateCommittedBuffer(MemoryLocation memoryLocation, float priority, const BufferDesc& bufferDesc, Buffer*& buffer) {
+    Result result = CreateImplementation<BufferVK>(buffer, bufferDesc);
+
+    if (result == Result::SUCCESS)
+        result = ((BufferVK*)buffer)->AllocateAndBindMemory(memoryLocation, priority, true);
+
+    if (result != Result::SUCCESS) {
+        Destroy((BufferVK*)buffer);
+        buffer = nullptr;
+    }
+
+    return result;
+}
+
+NRI_INLINE Result DeviceVK::CreateCommittedTexture(MemoryLocation memoryLocation, float priority, const TextureDesc& textureDesc, Texture*& texture) {
+    Result result = CreateImplementation<TextureVK>(texture, textureDesc);
+
+    if (result == Result::SUCCESS)
+        result = ((TextureVK*)texture)->AllocateAndBindMemory(memoryLocation, priority, true);
+
+    if (result != Result::SUCCESS) {
+        Destroy((TextureVK*)texture);
+        texture = nullptr;
+    }
+
+    return result;
+}
+
+NRI_INLINE Result DeviceVK::CreatePlacedBuffer(Memory* memory, uint64_t offset, const BufferDesc& bufferDesc, Buffer*& buffer) {
+    Result result = CreateImplementation<BufferVK>(buffer, bufferDesc);
+
+    if (result == Result::SUCCESS) {
+        if (memory)
+            result = ((BufferVK*)buffer)->BindMemory(*(MemoryVK*)memory, offset, true);
+        else
+            result = ((BufferVK*)buffer)->AllocateAndBindMemory((MemoryLocation)offset, 0.0f, false);
+    }
+
+    if (result != Result::SUCCESS) {
+        Destroy((BufferVK*)buffer);
+        buffer = nullptr;
+    }
+
+    return result;
+}
+
+NRI_INLINE Result DeviceVK::CreatePlacedTexture(Memory* memory, uint64_t offset, const TextureDesc& textureDesc, Texture*& texture) {
+    Result result = CreateImplementation<TextureVK>(texture, textureDesc);
+
+    if (result == Result::SUCCESS) {
+        if (memory)
+            result = ((TextureVK*)texture)->BindMemory(*(MemoryVK*)memory, offset);
+        else
+            result = ((TextureVK*)texture)->AllocateAndBindMemory((MemoryLocation)offset, 0.0f, false);
+    }
+
+    if (result != Result::SUCCESS) {
+        Destroy((TextureVK*)texture);
+        texture = nullptr;
+    }
+
+    return result;
+}
+
+NRI_INLINE Result DeviceVK::CreateCommittedAccelerationStructure(MemoryLocation memoryLocation, float priority, const AccelerationStructureDesc& accelerationStructureDesc, AccelerationStructure*& accelerationStructure) {
+    Result result = CreateImplementation<AccelerationStructureVK>(accelerationStructure, accelerationStructureDesc);
+
+    if (result == Result::SUCCESS)
+        result = ((AccelerationStructureVK*)accelerationStructure)->AllocateAndBindMemory(memoryLocation, priority, true);
+
+    if (result != Result::SUCCESS) {
+        Destroy((AccelerationStructureVK*)accelerationStructure);
+        accelerationStructure = nullptr;
+    }
+
+    return result;
+}
+
+NRI_INLINE Result DeviceVK::CreateCommittedMicromap(MemoryLocation memoryLocation, float priority, const MicromapDesc& micromapDesc, Micromap*& micromap) {
+    Result result = CreateImplementation<MicromapVK>(micromap, micromapDesc);
+
+    if (result == Result::SUCCESS)
+        result = ((MicromapVK*)micromap)->AllocateAndBindMemory(memoryLocation, priority, true);
+
+    if (result != Result::SUCCESS) {
+        Destroy((MicromapVK*)micromap);
+        micromap = nullptr;
+    }
+
+    return result;
+}
+
+NRI_INLINE Result DeviceVK::CreatePlacedAccelerationStructure(Memory* memory, uint64_t offset, const AccelerationStructureDesc& accelerationStructureDesc, AccelerationStructure*& accelerationStructure) {
+    Result result = CreateImplementation<AccelerationStructureVK>(accelerationStructure, accelerationStructureDesc);
+
+    if (result == Result::SUCCESS) {
+        if (memory)
+            result = ((AccelerationStructureVK*)accelerationStructure)->BindMemory((MemoryVK*)memory, offset);
+        else
+            result = ((AccelerationStructureVK*)accelerationStructure)->AllocateAndBindMemory((MemoryLocation)offset, 0.0f, false);
+    }
+
+    if (result != Result::SUCCESS) {
+        Destroy((AccelerationStructureVK*)accelerationStructure);
+        accelerationStructure = nullptr;
+    }
+
+    return result;
+}
+
+NRI_INLINE Result DeviceVK::CreatePlacedMicromap(Memory* memory, uint64_t offset, const MicromapDesc& micromapDesc, Micromap*& micromap) {
+    Result result = CreateImplementation<MicromapVK>(micromap, micromapDesc);
+
+    if (result == Result::SUCCESS) {
+        if (memory)
+            result = ((MicromapVK*)micromap)->BindMemory((MemoryVK*)memory, offset);
+        else
+            result = ((MicromapVK*)micromap)->AllocateAndBindMemory((MemoryLocation)offset, 0.0f, false);
+    }
+
+    if (result != Result::SUCCESS) {
+        Destroy((MicromapVK*)micromap);
+        micromap = nullptr;
+    }
+
+    return result;
 }
 
 NRI_INLINE Result DeviceVK::GetQueue(QueueType queueType, uint32_t queueIndex, Queue*& queue) {
@@ -3368,16 +3731,9 @@ Result DeviceVK::AcquireTransferContext(QueueVK& queue, TransferContextVK*& cont
         }
     }
 
-    context = Allocate<TransferContextVK>(GetAllocationCallbacks(), *this);
-    if (!context)
-        return Result::OUT_OF_MEMORY;
-
-    Result result = context->Create(queue);
-    if (result != Result::SUCCESS) {
-        Destroy(context);
-        context = nullptr;
+    Result result = CreateImplementation<TransferContextVK>(context, queue);
+    if (result != Result::SUCCESS)
         return result;
-    }
 
     context->SetInUse(true);
     m_TransferContexts.push_back(context);

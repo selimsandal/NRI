@@ -308,24 +308,6 @@ constexpr VkImageUsageFlags GetImageViewUsage(TextureView type) {
     return g_ImageViewUsage[(size_t)type];
 }
 
-constexpr std::array<VkImageLayout, (size_t)TextureView::MAX_NUM> g_ImageViewLayout = {
-    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,                     // TEXTURE
-    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,                     // TEXTURE_ARRAY
-    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,                     // TEXTURE_CUBE
-    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,                     // TEXTURE_CUBE_ARRAY
-    VK_IMAGE_LAYOUT_GENERAL,                                      // STORAGE_TEXTURE
-    VK_IMAGE_LAYOUT_GENERAL,                                      // STORAGE_TEXTURE_ARRAY
-    VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ,                         // SUBPASS_INPUT
-    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,                     // COLOR_ATTACHMENT
-    VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,             // DEPTH_STENCIL_ATTACHMENT
-    VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR, // SHADING_RATE_ATTACHMENT
-};
-NRI_VALIDATE_ARRAY(g_ImageViewLayout);
-
-constexpr VkImageLayout GetImageViewLayout(TextureView type) {
-    return g_ImageViewLayout[(size_t)type];
-}
-
 constexpr std::array<DescriptorType, (size_t)TextureView::MAX_NUM> g_ImageViewDescriptorType = {
     DescriptorType::TEXTURE,          // TEXTURE
     DescriptorType::TEXTURE,          // TEXTURE_ARRAY
@@ -409,7 +391,7 @@ constexpr VkPipelineStageFlags2 GetPipelineStageFlags(StageBits stageBits) {
     if (stageBits & StageBits::DEPTH_STENCIL_ATTACHMENT)
         flags |= VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT; // TODO: separate?
 
-    if (stageBits & StageBits::COLOR_ATTACHMENT)
+    if (stageBits & (StageBits::COLOR_ATTACHMENT | StageBits::RESOLVE_ATTACHMENT))
         flags |= VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
 
     if (stageBits & StageBits::SHADING_RATE_ATTACHMENT)
@@ -425,7 +407,7 @@ constexpr VkPipelineStageFlags2 GetPipelineStageFlags(StageBits stageBits) {
         flags |= VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
 
     if (stageBits & StageBits::COPY)
-        flags |= VK_PIPELINE_STAGE_2_COPY_BIT;
+        flags |= VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_CLEAR_BIT; // "CmdZeroBuffer" is a clear command
 
     if (stageBits & StageBits::RESOLVE)
         flags |= VK_PIPELINE_STAGE_2_RESOLVE_BIT;
@@ -452,10 +434,6 @@ constexpr VkPipelineStageFlags2 GetPipelineStageFlags(StageBits stageBits) {
 }
 
 constexpr VkShaderStageFlags GetShaderStageFlags(StageBits stage) {
-    // Check non-mask values first
-    if (stage == StageBits::ALL)
-        return VK_SHADER_STAGE_ALL;
-
     if (stage == StageBits::NONE)
         return 0;
 

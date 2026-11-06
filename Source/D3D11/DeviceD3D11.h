@@ -108,17 +108,8 @@ struct DeviceD3D11 final : public DeviceBase {
 #endif
 
     template <typename Implementation, typename Interface, typename... Args>
-    inline Result CreateImplementation(Interface*& entity, const Args&... args) {
-        Implementation* impl = Allocate<Implementation>(GetAllocationCallbacks(), *this);
-        Result result = impl->Create(args...);
-
-        if (result != Result::SUCCESS) {
-            Destroy(GetAllocationCallbacks(), impl);
-            entity = nullptr;
-        } else
-            entity = (Interface*)impl;
-
-        return result;
+    [[nodiscard]] inline Result CreateImplementation(Interface*& entity, Args&&... args) {
+        return nri::CreateImplementation(GetAllocationCallbacks(), entity, Allocate<Implementation>(GetAllocationCallbacks(), *this), std::forward<Args>(args)...);
     }
 
     Result Create(const DeviceCreationDesc& desc, const DeviceCreationD3D11Desc& descD3D11);
@@ -159,6 +150,10 @@ struct DeviceD3D11 final : public DeviceBase {
     // NRI
     //================================================================================================================
 
+    Result CreateCommittedBuffer(MemoryLocation memoryLocation, float priority, const BufferDesc& bufferDesc, Buffer*& buffer);
+    Result CreateCommittedTexture(MemoryLocation memoryLocation, float priority, const TextureDesc& textureDesc, Texture*& texture);
+    Result CreatePlacedBuffer(Memory* memory, uint64_t offset, const BufferDesc& bufferDesc, Buffer*& buffer);
+    Result CreatePlacedTexture(Memory* memory, uint64_t offset, const TextureDesc& textureDesc, Texture*& texture);
     Result GetQueue(QueueType queueType, uint32_t queueIndex, Queue*& queue);
     Result WaitIdle();
     Result UploadHostMemoryToTexture(QueueD3D11& queue, const UploadHostMemoryToTextureDesc* copyDescs, uint32_t copyDescNum);

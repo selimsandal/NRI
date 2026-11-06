@@ -50,22 +50,7 @@ using namespace nri;
 #include "TextureWGPU.hpp"
 
 Result CreateDeviceWGPU(const DeviceCreationDesc& desc, DeviceBase*& device) {
-    DeviceWGPU* impl = Allocate<DeviceWGPU>(desc.allocationCallbacks, desc.callbackInterface, desc.allocationCallbacks);
-
-    if (!impl) {
-        device = nullptr;
-
-        return Result::FAILURE;
-    }
-
-    Result result = impl->Create(desc);
-    if (result != Result::SUCCESS) {
-        Destroy(desc.allocationCallbacks, impl);
-        device = nullptr;
-    } else
-        device = (DeviceBase*)impl;
-
-    return result;
+    return CreateImplementation(desc.allocationCallbacks, device, Allocate<DeviceWGPU>(desc.allocationCallbacks, desc.callbackInterface, desc.allocationCallbacks), desc);
 }
 
 //============================================================================================================================================================================================
@@ -100,8 +85,11 @@ static Result NRI_CALL CreateCommandBuffer(CommandAllocator& commandAllocator, C
     return ((CommandAllocatorWGPU&)commandAllocator).CreateCommandBuffer(commandBuffer);
 }
 
-static Result NRI_CALL CreateFence(Device& device, uint64_t initialValue, Fence*& fence) {
-    return ((DeviceWGPU&)device).CreateImplementation<FenceWGPU>(fence, initialValue);
+static Result NRI_CALL CreateFence(Device& device, const FenceDesc& fenceDesc, Fence*& fence) {
+    if (fenceDesc.shared)
+        return Result::UNSUPPORTED;
+
+    return ((DeviceWGPU&)device).CreateImplementation<FenceWGPU>(fence, fenceDesc.initialValue);
 }
 
 static Result NRI_CALL CreateDescriptorPool(Device& device, const DescriptorPoolDesc& descriptorPoolDesc, DescriptorPool*& descriptorPool) {
@@ -628,6 +616,24 @@ static uint64_t NRI_CALL GetDescriptorNativeObject(const Descriptor* descriptor)
     }
 }
 
+static Result NRI_CALL GetBufferSharedHandle(const Buffer&, SharedHandle& sharedHandle) {
+    sharedHandle = {};
+
+    return Result::UNSUPPORTED;
+}
+
+static Result NRI_CALL GetTextureSharedHandle(const Texture&, SharedHandle& sharedHandle) {
+    sharedHandle = {};
+
+    return Result::UNSUPPORTED;
+}
+
+static Result NRI_CALL GetFenceSharedHandle(const Fence&, SharedHandle& sharedHandle) {
+    sharedHandle = {};
+
+    return Result::UNSUPPORTED;
+}
+
 Result DeviceWGPU::FillFunctionTable(CoreInterface& table) const {
     table.GetDeviceDesc = ::GetDeviceDesc;
     table.GetBufferDesc = ::GetBufferDesc;
@@ -743,6 +749,10 @@ Result DeviceWGPU::FillFunctionTable(CoreInterface& table) const {
     table.GetBufferNativeObject = ::GetBufferNativeObject;
     table.GetTextureNativeObject = ::GetTextureNativeObject;
     table.GetDescriptorNativeObject = ::GetDescriptorNativeObject;
+    table.GetBufferSharedHandle = ::GetBufferSharedHandle;
+    table.GetTextureSharedHandle = ::GetTextureSharedHandle;
+    table.GetFenceSharedHandle = ::GetFenceSharedHandle;
+    table.DestroySharedHandle = DestroySharedHandle;
 
     return Result::SUCCESS;
 }
@@ -798,19 +808,8 @@ Result DeviceWGPU::FillFunctionTable(HelperInterface& table) const {
 
 static Result NRI_CALL CreateImgui(Device& device, const ImguiDesc& imguiDesc, Imgui*& imgui) {
     DeviceWGPU& deviceWGPU = (DeviceWGPU&)device;
-    ImguiImpl* impl = Allocate<ImguiImpl>(deviceWGPU.GetAllocationCallbacks(), device, deviceWGPU.GetCoreInterface());
-    if (!impl)
-        return Result::OUT_OF_MEMORY;
 
-    Result result = impl->Create(imguiDesc);
-
-    if (result != Result::SUCCESS) {
-        Destroy(impl);
-        imgui = nullptr;
-    } else
-        imgui = (Imgui*)impl;
-
-    return result;
+    return CreateImplementation(deviceWGPU.GetAllocationCallbacks(), imgui, Allocate<ImguiImpl>(deviceWGPU.GetAllocationCallbacks(), device, deviceWGPU.GetCoreInterface()), imguiDesc);
 }
 
 static void NRI_CALL DestroyImgui(Imgui* imgui) {
@@ -877,19 +876,8 @@ Result DeviceWGPU::FillFunctionTable(RayTracingInterface&) const {
 
 static Result NRI_CALL CreateStreamer(Device& device, const StreamerDesc& streamerDesc, Streamer*& streamer) {
     DeviceWGPU& deviceWGPU = (DeviceWGPU&)device;
-    StreamerImpl* impl = Allocate<StreamerImpl>(deviceWGPU.GetAllocationCallbacks(), device, deviceWGPU.GetCoreInterface());
-    if (!impl)
-        return Result::OUT_OF_MEMORY;
 
-    Result result = impl->Create(streamerDesc);
-
-    if (result != Result::SUCCESS) {
-        Destroy(impl);
-        streamer = nullptr;
-    } else
-        streamer = (Streamer*)impl;
-
-    return result;
+    return CreateImplementation(deviceWGPU.GetAllocationCallbacks(), streamer, Allocate<StreamerImpl>(deviceWGPU.GetAllocationCallbacks(), device, deviceWGPU.GetCoreInterface()), streamerDesc);
 }
 
 static void NRI_CALL DestroyStreamer(Streamer* streamer) {
@@ -998,16 +986,8 @@ Result DeviceWGPU::FillFunctionTable(SwapChainInterface& table) const {
 
 static Result NRI_CALL CreateUpscaler(Device& device, const UpscalerDesc& upscalerDesc, Upscaler*& upscaler) {
     DeviceWGPU& deviceWGPU = (DeviceWGPU&)device;
-    UpscalerImpl* impl = Allocate<UpscalerImpl>(deviceWGPU.GetAllocationCallbacks(), device, deviceWGPU.GetCoreInterface());
-    Result result = impl->Create(upscalerDesc);
 
-    if (result != Result::SUCCESS) {
-        Destroy(deviceWGPU.GetAllocationCallbacks(), impl);
-        upscaler = nullptr;
-    } else
-        upscaler = (Upscaler*)impl;
-
-    return result;
+    return CreateImplementation(deviceWGPU.GetAllocationCallbacks(), upscaler, Allocate<UpscalerImpl>(deviceWGPU.GetAllocationCallbacks(), device, deviceWGPU.GetCoreInterface()), upscalerDesc);
 }
 
 static void NRI_CALL DestroyUpscaler(Upscaler* upscaler) {
