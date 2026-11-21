@@ -4,6 +4,8 @@
 
 #include <metal_stdlib>
 
+#include "NRI.metal" // native ray tracing ABI ("nri_ray_dispatch")
+
 using namespace metal;
 
 //============================================================================================================================================================================================
@@ -300,4 +302,31 @@ kernel void nri_prepare_rays_indirect(constant PrepareRaysIndirectArgs& args [[b
     args.dispatch[3] = 8;
     args.dispatch[4] = 8;
     args.dispatch[5] = 1;
+}
+
+//============================================================================================================================================================================================
+// Native ray tracing pipelines: the compute function, the app's ray generation, miss and closest-hit shaders are statically linked visible functions.
+// Visible functions can't bind arguments, so the heaps and root data are passed to them in "NriRayContext"
+
+kernel void nri_ray_dispatch(constant NriDescriptorEntry* resourceHeap [[buffer(0)]],
+    constant NriDescriptorEntry* samplerHeap [[buffer(1)]],
+    constant uchar* rootData [[buffer(2)]],
+    constant NriRayDispatchArguments& arguments [[buffer(3)]],
+    uint3 index [[thread_position_in_grid]]) {
+    if (index.x >= arguments.width || index.y >= arguments.height || index.z >= arguments.depth)
+        return;
+
+    constant NriShaderIdentifier* raygen = NriGetShaderRecord(arguments.raygen, 0);
+    if (!raygen->shaderHandle)
+        return;
+
+    NriRayContext context = {};
+    context.resourceHeap = resourceHeap;
+    context.samplerHeap = samplerHeap;
+    context.rootData = rootData;
+    context.arguments = &arguments;
+    context.dispatchIndex = index;
+    context.dispatchDimensions = uint3(arguments.width, arguments.height, arguments.depth);
+
+    arguments.functions[raygen->shaderHandle](context, nullptr);
 }

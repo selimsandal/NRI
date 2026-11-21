@@ -1027,7 +1027,7 @@ file(WRITE "${OUT}" "${DATA}")
                 list(APPEND INPUTS -D "IN=${METALLIB}")
             endif()
             list(APPEND COMMANDS
-                COMMAND "${NRI_XCRUN}" -sdk ${SDK} metal -std=metal4.0 ${VERSION_MIN} -c "${SOURCE}" -o "${AIR}"
+                COMMAND "${NRI_XCRUN}" -sdk ${SDK} metal -std=metal4.0 ${VERSION_MIN} -I "${CMAKE_CURRENT_SOURCE_DIR}/Include" -c "${SOURCE}" -o "${AIR}"
                 COMMAND "${NRI_XCRUN}" -sdk ${SDK} metallib "${AIR}" -o "${METALLIB}"
             )
         endforeach()
@@ -1036,7 +1036,7 @@ file(WRITE "${OUT}" "${DATA}")
             OUTPUT "${HEADER}"
             ${COMMANDS}
             COMMAND "${CMAKE_COMMAND}" ${INPUTS} -D "OUT=${HEADER}" -D "NAME=${NAME}" -P "${NRI_METALLIB_SCRIPT}"
-            DEPENDS "${SOURCE}" "${NRI_METALLIB_SCRIPT}"
+            DEPENDS "${SOURCE}" "${CMAKE_CURRENT_SOURCE_DIR}/Include/NRI.metal" "${NRI_METALLIB_SCRIPT}"
             VERBATIM
         )
         add_custom_target(NRI_Metal_${NAME}Shader

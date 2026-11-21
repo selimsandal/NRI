@@ -74,6 +74,7 @@ Ray tracing:
   - not supported yet for native shaders: intersection, any-hit and callable shaders, "CmdDispatchRaysIndirect"
 */
 
+#include <metal_stdlib>
 #include <metal_raytracing>
 
 struct NriDescriptorEntry {

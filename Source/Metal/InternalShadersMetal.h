@@ -50,6 +50,35 @@ struct PrepareRaysIndirectArgsMetal {
     MTL::GPUAddress dispatch; // "MTLDispatchThreadsIndirectArguments"
 };
 
+// Native ray tracing pipelines ("NRI.metal"): shader binding table records start with "NriShaderIdentifier"
+struct ShaderIdentifierMetal {
+    uint64_t intersectionShaderHandle; // visible function table index, 0 - none
+    uint64_t shaderHandle;             // visible function table index, 0 - none
+    uint64_t reserved[2];
+};
+
+struct ShaderTableMetal {
+    MTL::GPUAddress startAddress;
+    uint64_t size;
+    uint64_t stride;
+};
+
+// "NriRayDispatchArguments", bound at "ARGUMENT_SLOT_RAY_DISPATCH" for "nri_ray_dispatch"
+struct RayDispatchArgumentsMetal {
+    ShaderTableMetal raygen;
+    ShaderTableMetal miss;
+    ShaderTableMetal hit;
+    ShaderTableMetal callable;
+    uint32_t width;
+    uint32_t height;
+    uint32_t depth;
+    uint32_t padding;
+    MTL::ResourceID functions; // "visible_function_table<NriRayFunction>"
+};
+
+static_assert(sizeof(ShaderIdentifierMetal) == 32, "Must match 'NriShaderIdentifier' ('NRI.metal')");
+static_assert(sizeof(RayDispatchArgumentsMetal) == 120, "Must match 'NriRayDispatchArguments' ('NRI.metal')");
+
 // "TopLevelInstanceBits" 0-3 match "MTLAccelerationStructureInstanceOptions", micromap bits are dropped by the kernel
 static_assert(sizeof(TopLevelInstance) == 64, "Unexpected 'TopLevelInstance' size");
 static_assert(sizeof(MTL::IndirectAccelerationStructureInstanceDescriptor) == 72, "Unexpected 'MTLIndirectAccelerationStructureInstanceDescriptor' size");
@@ -103,6 +132,11 @@ struct InternalShadersMetal {
 
     inline MTL4::FunctionDescriptor* GetDepthOnlyFragmentFunction() const {
         return m_DepthOnlyFragmentFunction;
+    }
+
+    // "nri_ray_dispatch", the compute function of native ray tracing pipelines (the caller releases it)
+    inline MTL4::FunctionDescriptor* NewRayDispatchFunction() const {
+        return NewFunction("nri_ray_dispatch");
     }
 
     Result Create();

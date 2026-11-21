@@ -134,6 +134,7 @@ private:
     void DrawEmulatedIndirect(MTL::GPUAddress arguments, MTL::GPUAddress roots, uint32_t drawNum, uint32_t stride, bool indexed);
 #endif
     MTL::ComputePipelineState* GetInternalKernel(InternalKernelMetal kernel); // records a failure if unavailable
+    void DispatchRaysNative(const DispatchRaysDesc& desc);
 #if NRI_ENABLE_METAL_SHADER_CONVERTER
     MTL::GPUAddress SetRayDispatchArguments(const IRDispatchRaysDescriptor& desc);
 #endif

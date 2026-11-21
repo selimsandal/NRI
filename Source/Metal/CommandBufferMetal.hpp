@@ -1965,6 +1965,51 @@ NRI_INLINE void CommandBufferMetal::CmdWriteAccelerationStructureSizes(const Acc
     encoder->dispatchThreads(MTL::Size(threadNum, 1, 1), MTL::Size(std::min(threadNum, 64u), 1, 1));
 }
 
+static inline ShaderTableMetal GetShaderTable(const StridedBufferRegion& region) {
+    ShaderTableMetal table = {};
+    table.startAddress = region.buffer ? ((const BufferMetal*)region.buffer)->GetGpuAddress() + region.offset : 0;
+    table.size = region.size;
+    table.stride = region.stride;
+
+    return table;
+}
+
+// Native ray tracing pipelines: "nri_ray_dispatch" reads heaps and root data like any native compute shader ("buffer(0-2)") and its arguments at
+// "ARGUMENT_SLOT_RAY_DISPATCH" ("NriRayDispatchArguments", "NRI.metal")
+void CommandBufferMetal::DispatchRaysNative(const DispatchRaysDesc& desc) {
+    RayDispatchArgumentsMetal args = {};
+    args.raygen = GetShaderTable(desc.raygenShaderRecord);
+    args.miss = GetShaderTable(desc.missShaderBindingTable);
+    args.hit = GetShaderTable(desc.hitShaderBindingTable);
+    args.callable = GetShaderTable(desc.callableShaderBindingTable);
+    args.width = desc.width;
+    args.height = desc.height;
+    args.depth = desc.depth;
+    args.functions = m_Pipeline->GetVisibleFunctionTableResourceID();
+
+    BindArguments(BindPoint::COMPUTE);
+
+    // "nri_ray_dispatch" always declares heaps and root data, Metal validation requires them to be bound even if unused (no descriptor pool,
+    // no samplers or an empty layout). Bind zeros instead (like tessellation emulation does)
+    const MTL::GPUAddress zeros = m_Device.GetConstantsAddress();
+    if (!m_DescriptorPool || !m_DescriptorPool->GetResourceHeapAddress()) {
+        SetArgumentAddress(ARGUMENT_SLOT_RESOURCE_HEAP, zeros);
+        m_AreHeapsDirty = true;
+    }
+
+    if (!m_DescriptorPool || !m_DescriptorPool->GetSamplerHeapAddress()) {
+        SetArgumentAddress(ARGUMENT_SLOT_SAMPLER_HEAP, zeros);
+        m_AreHeapsDirty = true;
+    }
+
+    if (!m_Compute.layout || m_Compute.root.empty())
+        SetArgumentAddress(ARGUMENT_SLOT_ROOT, zeros);
+
+    SetArgumentAddress(ARGUMENT_SLOT_RAY_DISPATCH, Upload(&args, sizeof(args)));
+    SetComputeState(m_Arguments, m_Pipeline->GetComputePipeline());
+    m_ComputeEncoder->dispatchThreads(MTL::Size(desc.width, desc.height, desc.depth), m_Pipeline->GetThreadGroupSize());
+}
+
 #if NRI_ENABLE_METAL_SHADER_CONVERTER
 
 MTL::GPUAddress CommandBufferMetal::SetRayDispatchArguments(const IRDispatchRaysDescriptor& desc) {
@@ -1983,6 +2028,11 @@ MTL::GPUAddress CommandBufferMetal::SetRayDispatchArguments(const IRDispatchRays
 }
 
 NRI_INLINE void CommandBufferMetal::CmdDispatchRays(const DispatchRaysDesc& desc) {
+    if (!m_Pipeline->IsConverted()) {
+        DispatchRaysNative(desc);
+        return;
+    }
+
     auto getAddress = [](const StridedBufferRegion& region) -> uint64_t {
         return region.buffer ? ((const BufferMetal*)region.buffer)->GetGpuAddress() + region.offset : 0;
     };
@@ -2013,6 +2063,12 @@ NRI_INLINE void CommandBufferMetal::CmdDispatchRays(const DispatchRaysDesc& desc
 }
 
 NRI_INLINE void CommandBufferMetal::CmdDispatchRaysIndirect(const Buffer& buffer, uint64_t offset) {
+    if (!m_Pipeline->IsConverted()) {
+        NRI_REPORT_WARNING(&m_Device, "'CmdDispatchRaysIndirect' is not supported for native ray tracing pipelines yet");
+        RecordFailure(Result::UNSUPPORTED);
+        return;
+    }
+
     MTL::ComputePipelineState* prepareRays = GetInternalKernel(InternalKernelMetal::PREPARE_RAYS_INDIRECT);
 
     if (!prepareRays)
@@ -2039,10 +2095,13 @@ NRI_INLINE void CommandBufferMetal::CmdDispatchRaysIndirect(const Buffer& buffer
 
 #else
 
-NRI_INLINE void CommandBufferMetal::CmdDispatchRays(const DispatchRaysDesc&) {
+NRI_INLINE void CommandBufferMetal::CmdDispatchRays(const DispatchRaysDesc& desc) {
+    DispatchRaysNative(desc);
 }
 
 NRI_INLINE void CommandBufferMetal::CmdDispatchRaysIndirect(const Buffer&, uint64_t) {
+    NRI_REPORT_WARNING(&m_Device, "'CmdDispatchRaysIndirect' is not supported for native ray tracing pipelines yet");
+    RecordFailure(Result::UNSUPPORTED);
 }
 
 #endif

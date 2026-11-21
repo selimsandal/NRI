@@ -56,8 +56,10 @@ struct PipelineMetal final : public DebugNameBase {
 
 private:
     Result LoadFunction(const ShaderDesc& shader, MTL::Library*& library, MTL4::FunctionDescriptor*& function, const ShaderLoadDescMetal& loadDesc);
+    Result CreateNativeRayTracing(const RayTracingPipelineDesc& desc);
 #if NRI_ENABLE_METAL_SHADER_CONVERTER
     Result ConvertShader(const ShaderDesc& shader, const ShaderLoadDescMetal& loadDesc, Vector<uint8_t>& storage, const uint8_t*& container);
+    Result CreateConvertedRayTracing(const RayTracingPipelineDesc& desc);
 #endif
 
     DeviceMetal& m_Device;

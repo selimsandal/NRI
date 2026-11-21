@@ -583,18 +583,19 @@ void DeviceMetal::FillDesc(const AdapterDesc& adapterDesc) {
     // 1024 threadgroups per mesh grid limit of Apple7/Apple8
     m_Desc.features.geometryShader = m_Device->supportsFamily(MTL::GPUFamilyApple9);
     m_Desc.features.tessellationShader = m_Desc.features.geometryShader;
+#endif
 
-    // Ray tracing pipelines are DXIL-only (Converter's DXR emulation). Metal 4 acceleration structures require Apple9+ (despite "supportsRaytracing")
+    // Ray tracing pipelines take DXIL (Converter's DXR emulation) or native shaders ("NRI.metal"), both use 32-byte shader identifiers.
+    // Metal 4 acceleration structures require Apple9+ (despite "supportsRaytracing")
     if (m_Device->supportsFamily(MTL::GPUFamilyApple9)) {
         m_Desc.tiers.rayTracing = 2;
         m_Desc.memoryAlignment.scratchBufferOffset = 256;
         m_Desc.memoryAlignment.shaderBindingTable = 64;
-        m_Desc.shaderStage.rayTracing.shaderGroupIdentifierSize = sizeof(IRShaderIdentifier);
+        m_Desc.shaderStage.rayTracing.shaderGroupIdentifierSize = sizeof(ShaderIdentifierMetal);
         m_Desc.shaderStage.rayTracing.shaderBindingTableMaxStride = 4096;
         m_Desc.shaderStage.rayTracing.recursionMaxDepth = 31;
         m_Desc.accelerationStructure.primitiveMaxNum = 1u << 24;
         m_Desc.accelerationStructure.geometryMaxNum = 1u << 20;
         m_Desc.accelerationStructure.instanceMaxNum = 1u << 20;
     }
-#endif
 }

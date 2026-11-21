@@ -1166,16 +1166,61 @@ Result PipelineMetal::Create(const ComputePipelineDesc& desc) {
     return result;
 }
 
-// Ray tracing pipelines are DXIL-only (Converter's DXR emulation ABI), native shaders can only use inline ray tracing. Their conversions are not cached
+// Ray tracing pipelines take either DXIL shaders (Converter's DXR emulation ABI, conversions are not cached) or native metallibs ("NRI.metal" native
+// ray tracing ABI), not both. Both use the same visible function table layout and 32-byte shader identifiers ("shaderGroupIdentifierSize")
 
+static_assert(sizeof(ShaderIdentifierMetal) == 32, "'shaderGroupIdentifierSize' is the same for native and converted shaders");
 #if NRI_ENABLE_METAL_SHADER_CONVERTER
+static_assert(sizeof(IRShaderIdentifier) == sizeof(ShaderIdentifierMetal), "'shaderGroupIdentifierSize' is the same for native and converted shaders");
+#endif
+
+// Visible function table: slot 0 is "null", shader "i" is at "1 + i", intersection / any-hit function of hit group "i" is at "1 + shaderNum + i".
+// Visible functions are renamed to "nri_rt_<slot>", since entry points of different shaders may have the same name
+static inline void GetVisibleFunctionName(size_t slot, char (&name)[32]) {
+    snprintf(name, sizeof(name), "nri_rt_%zu", slot);
+}
 
 Result PipelineMetal::Create(const RayTracingPipelineDesc& desc) {
     const ShaderLibraryDesc& shaderLibrary = *desc.shaderLibrary;
 
+    uint32_t dxilNum = 0;
     for (uint32_t i = 0; i < shaderLibrary.shaderNum; i++) {
-        if (!IsDXIL(shaderLibrary.shaders[i])) {
-            NRI_REPORT_WARNING(&m_Device, "Ray tracing pipelines require DXIL shaders");
+        if (IsDXIL(shaderLibrary.shaders[i]))
+            dxilNum++;
+        else if (IsMetalBundle(shaderLibrary.shaders[i])) {
+            NRI_REPORT_WARNING(&m_Device, "Ray tracing pipelines take DXIL or native metallib shaders, not pre-converted bundles");
+
+            return Result::UNSUPPORTED;
+        }
+    }
+
+    if (dxilNum == 0)
+        return CreateNativeRayTracing(desc);
+
+    if (dxilNum != shaderLibrary.shaderNum) {
+        NRI_REPORT_WARNING(&m_Device, "Ray tracing pipelines can't mix DXIL and native shaders");
+
+        return Result::UNSUPPORTED;
+    }
+
+#if NRI_ENABLE_METAL_SHADER_CONVERTER
+    return CreateConvertedRayTracing(desc);
+#else
+    NRI_REPORT_WARNING(&m_Device, "DXIL ray tracing shaders require Metal Shader Converter ('NRI_ENABLE_METAL_SHADER_CONVERTER')");
+
+    return Result::UNSUPPORTED;
+#endif
+}
+
+// The compute function is "nri_ray_dispatch" ("InternalMetal.metal"), the app's shaders are statically linked visible functions
+Result PipelineMetal::CreateNativeRayTracing(const RayTracingPipelineDesc& desc) {
+    const ShaderLibraryDesc& shaderLibrary = *desc.shaderLibrary;
+
+    for (uint32_t i = 0; i < shaderLibrary.shaderNum; i++) {
+        const StageBits stage = shaderLibrary.shaders[i].stage;
+
+        if (stage != StageBits::RAYGEN_SHADER && stage != StageBits::MISS_SHADER && stage != StageBits::CLOSEST_HIT_SHADER) {
+            NRI_REPORT_WARNING(&m_Device, "Native ray tracing pipelines support only ray generation, miss and closest-hit shaders");
 
             return Result::UNSUPPORTED;
         }
@@ -1184,19 +1229,162 @@ Result PipelineMetal::Create(const RayTracingPipelineDesc& desc) {
     AutoreleasePoolMetal autoreleasePool; // "NS::Error" is autoreleased
 
     m_Layout = (const PipelineLayoutMetal*)desc.pipelineLayout;
+    m_Converted = false;
+    m_ThreadGroup = MTL::Size(8, 8, 1);
+
+    const uint32_t shaderNum = shaderLibrary.shaderNum;
+    Scratch<MTL::Library*> libraries = NRI_ALLOCATE_SCRATCH(m_Device, MTL::Library*, shaderNum);
+    Scratch<MTL4::FunctionDescriptor*> functions = NRI_ALLOCATE_SCRATCH(m_Device, MTL4::FunctionDescriptor*, shaderNum);
+    std::fill_n((MTL::Library**)libraries, shaderNum, nullptr);
+    std::fill_n((MTL4::FunctionDescriptor**)functions, shaderNum, nullptr);
+
+    Result result = Result::SUCCESS;
+
+    // Shaders
+    for (uint32_t i = 0; i < shaderNum && result == Result::SUCCESS; i++) {
+        const ShaderDesc& shader = shaderLibrary.shaders[i];
+        const char* entry = shader.entryPointName ? shader.entryPointName : "main";
+
+        dispatch_data_t data = dispatch_data_create(shader.bytecode, (size_t)shader.size, dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+
+        NS::Error* error = nullptr;
+        libraries[i] = m_Device.GetNativeObject()->newLibrary(data, &error);
+        dispatch_release(data);
+
+        if (!libraries[i]) {
+            NRI_REPORT_ERROR(&m_Device, "Metal library creation failed for '%s': %s", entry, error ? error->localizedDescription()->utf8String() : "unknown error");
+            result = Result::FAILURE;
+            break;
+        }
+
+        MTL::Function* reflected = libraries[i]->newFunction(NS::String::string(entry, NS::UTF8StringEncoding));
+        const bool isVisible = reflected && reflected->functionType() == MTL::FunctionTypeVisible;
+
+        if (reflected)
+            reflected->release();
+
+        if (!isVisible) {
+            NRI_REPORT_ERROR(&m_Device, "Native ray tracing entry point '%s' was not found or is not a '[[visible]]' function", entry);
+            result = Result::FAILURE;
+            break;
+        }
+
+        char visibleName[32];
+        GetVisibleFunctionName(i, visibleName);
+        functions[i] = NewFunctionDescriptor(libraries[i], entry, nullptr, visibleName);
+    }
+
+    // Pipeline
+    MTL4::FunctionDescriptor* dispatchFunction = result == Result::SUCCESS ? m_Device.GetInternalShaders().NewRayDispatchFunction() : nullptr;
+
+    if (result == Result::SUCCESS) {
+        MTL4::StaticLinkingDescriptor* linking = MTL4::StaticLinkingDescriptor::alloc()->init();
+        linking->setFunctionDescriptors(NS::Array::array((const NS::Object* const*)(MTL4::FunctionDescriptor**)functions, shaderNum));
+
+        MTL4::ComputePipelineDescriptor* pipelineDesc = MTL4::ComputePipelineDescriptor::alloc()->init();
+        pipelineDesc->setComputeFunctionDescriptor(dispatchFunction);
+        pipelineDesc->setStaticLinkingDescriptor(linking);
+
+        // Call depth: ray generation, a closest-hit or miss shader per recursion level, plus one (validated with "recursionMaxDepth = 1")
+        MTL4::PipelineStageDynamicLinkingDescriptor* dynamicLinking = MTL4::PipelineStageDynamicLinkingDescriptor::alloc()->init();
+        dynamicLinking->setMaxCallStackDepth(desc.recursionMaxDepth + 2);
+
+        const bool failOnCacheMiss = desc.flags & RayTracingPipelineBits::FAIL_ON_CACHE_MISS;
+
+        NS::Error* error = nullptr;
+        m_Compute = NewComputePipeline(m_Device, desc.cache, failOnCacheMiss, pipelineDesc, dynamicLinking, &error);
+
+        if (!m_Compute) {
+            result = Result::FAILURE;
+
+            if (!failOnCacheMiss)
+                NRI_REPORT_ERROR(&m_Device, "Metal native ray-tracing pipeline creation failed: %s", error ? error->localizedDescription()->utf8String() : "unknown error");
+        }
+
+        dynamicLinking->release();
+        pipelineDesc->release();
+        linking->release();
+    }
+
+    // Visible function table
+    if (result == Result::SUCCESS) {
+        MTL::VisibleFunctionTableDescriptor* tableDesc = MTL::VisibleFunctionTableDescriptor::alloc()->init();
+        tableDesc->setFunctionCount(shaderNum + 1);
+        m_VisibleFunctionTable = m_Compute->newVisibleFunctionTable(tableDesc);
+        tableDesc->release();
+
+        if (m_VisibleFunctionTable) {
+            m_Device.AddResidency(m_VisibleFunctionTable); // released in the destructor
+
+            for (uint32_t i = 0; i < shaderNum; i++) {
+                char name[32];
+                GetVisibleFunctionName(i, name);
+
+                m_VisibleFunctionTable->setFunction(m_Compute->functionHandle(NS::String::string(name, NS::UTF8StringEncoding)), i + 1);
+            }
+        } else
+            result = Result::OUT_OF_MEMORY;
+    }
+
+    // Shader group identifiers: "shaderIndices" are 1-based, i.e. the visible function table slot
+    if (result == Result::SUCCESS) {
+        m_ShaderGroupIdentifiers.resize(desc.shaderGroupNum * sizeof(ShaderIdentifierMetal));
+
+        for (uint32_t i = 0; i < desc.shaderGroupNum; i++) {
+            ShaderIdentifierMetal identifier = {};
+
+            for (uint32_t index : desc.shaderGroups[i].shaderIndices) {
+                if (index)
+                    identifier.shaderHandle = index;
+            }
+
+            memcpy(m_ShaderGroupIdentifiers.data() + i * sizeof(identifier), &identifier, sizeof(identifier));
+        }
+    }
+
+    // Cleanup
+    if (dispatchFunction)
+        dispatchFunction->release();
+
+    for (uint32_t i = 0; i < shaderNum; i++) {
+        if (functions[i])
+            functions[i]->release();
+
+        if (libraries[i])
+            libraries[i]->release();
+    }
+
+    return result;
+}
+
+NRI_INLINE Result PipelineMetal::WriteShaderGroupIdentifiers(uint32_t baseShaderGroupIndex, uint32_t shaderGroupNum, uint32_t dstStride, void* dst) const {
+    const uint8_t* src = m_ShaderGroupIdentifiers.data() + baseShaderGroupIndex * sizeof(ShaderIdentifierMetal);
+    uint8_t* destination = (uint8_t*)dst;
+
+    for (uint32_t i = 0; i < shaderGroupNum; i++) {
+        memcpy(destination, src, sizeof(ShaderIdentifierMetal));
+        src += sizeof(ShaderIdentifierMetal);
+        destination += dstStride;
+    }
+
+    return Result::SUCCESS;
+}
+
+#if NRI_ENABLE_METAL_SHADER_CONVERTER
+
+Result PipelineMetal::CreateConvertedRayTracing(const RayTracingPipelineDesc& desc) {
+    const ShaderLibraryDesc& shaderLibrary = *desc.shaderLibrary;
+
+    AutoreleasePoolMetal autoreleasePool; // "NS::Error" is autoreleased
+
+    m_Layout = (const PipelineLayoutMetal*)desc.pipelineLayout;
     m_Converted = true;
 
-    // Visible function table: slot 0 is "null", shader "i" is at "1 + i", intersection / any-hit function of hit group "i" is at "1 + shaderNum + i".
-    // Visible functions are renamed to "nri_rt_<slot>", since entry points of different shaders may have the same name
     const uint32_t slotNum = shaderLibrary.shaderNum + desc.shaderGroupNum;
     Scratch<MTL::Library*> libraries = NRI_ALLOCATE_SCRATCH(m_Device, MTL::Library*, slotNum);
     Scratch<MTL4::FunctionDescriptor*> functions = NRI_ALLOCATE_SCRATCH(m_Device, MTL4::FunctionDescriptor*, slotNum);
     std::fill_n((MTL::Library**)libraries, slotNum, nullptr);
     std::fill_n((MTL4::FunctionDescriptor**)functions, slotNum, nullptr);
-
-    auto getVisibleFunctionName = [](size_t slot, char (&name)[32]) {
-        snprintf(name, sizeof(name), "nri_rt_%zu", slot);
-    };
 
     IRRayTracingPipelineConfiguration* configuration = IRRayTracingPipelineConfigurationCreate();
     IRRayTracingPipelineConfigurationSetMaxAttributeSizeInBytes(configuration, desc.rayHitAttributeMaxSize);
@@ -1251,7 +1439,7 @@ Result PipelineMetal::Create(const RayTracingPipelineDesc& desc) {
         }
 
         char visibleName[32];
-        getVisibleFunctionName(slot, visibleName);
+        GetVisibleFunctionName(slot, visibleName);
 
         bool isLoaded = IRObjectGetMetalLibBinary(output, stage, binary) && loadBinary(binary, name, libraries[slot], functions[slot], visibleName);
 
@@ -1444,7 +1632,7 @@ Result PipelineMetal::Create(const RayTracingPipelineDesc& desc) {
             for (uint32_t i = 0; i < slotNum; i++) {
                 if (functions[i]) {
                     char name[32];
-                    getVisibleFunctionName(i, name);
+                    GetVisibleFunctionName(i, name);
 
                     m_VisibleFunctionTable->setFunction(m_Compute->functionHandle(NS::String::string(name, NS::UTF8StringEncoding)), i + 1);
                 }
@@ -1519,29 +1707,6 @@ Result PipelineMetal::Create(const RayTracingPipelineDesc& desc) {
     IRRayTracingPipelineConfigurationDestroy(configuration);
 
     return result;
-}
-
-NRI_INLINE Result PipelineMetal::WriteShaderGroupIdentifiers(uint32_t baseShaderGroupIndex, uint32_t shaderGroupNum, uint32_t dstStride, void* dst) const {
-    const uint8_t* src = m_ShaderGroupIdentifiers.data() + baseShaderGroupIndex * sizeof(IRShaderIdentifier);
-    uint8_t* destination = (uint8_t*)dst;
-
-    for (uint32_t i = 0; i < shaderGroupNum; i++) {
-        memcpy(destination, src, sizeof(IRShaderIdentifier));
-        src += sizeof(IRShaderIdentifier);
-        destination += dstStride;
-    }
-
-    return Result::SUCCESS;
-}
-
-#else
-
-Result PipelineMetal::Create(const RayTracingPipelineDesc&) {
-    return Result::UNSUPPORTED;
-}
-
-NRI_INLINE Result PipelineMetal::WriteShaderGroupIdentifiers(uint32_t, uint32_t, uint32_t, void*) const {
-    return Result::UNSUPPORTED;
 }
 
 #endif

@@ -70,6 +70,7 @@ constexpr uint32_t ARGUMENT_SLOT_RESOURCE_HEAP = 0;
 constexpr uint32_t ARGUMENT_SLOT_SAMPLER_HEAP = 1;
 constexpr uint32_t ARGUMENT_SLOT_ROOT = 2;
 constexpr uint32_t ARGUMENT_SLOT_MULTIVIEW = 3;      // native only
+constexpr uint32_t ARGUMENT_SLOT_RAY_DISPATCH = 3;   // native ray tracing pipelines ("NriRayDispatchArguments"), matches "kIRRayDispatchArgumentsBindPoint"
 constexpr uint32_t ARGUMENT_SLOT_DRAW_ARGUMENTS = 4; // converted only
 constexpr uint32_t ARGUMENT_SLOT_DRAW_UNIFORMS = 5;  // converted only
 constexpr uint32_t ARGUMENT_SLOT_VERTEX_BUFFER_BASE = 6;
